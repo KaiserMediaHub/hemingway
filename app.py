@@ -130,27 +130,32 @@ def get_style_docs(client_id):
 
 
 @app.route('/api/clients/<int:client_id>/style-docs', methods=['POST'])
+@app.route('/api/clients/<int:client_id>/docs', methods=['POST'])
 @require_auth
 def upload_style_doc(client_id):
     db = get_db()
     if not db.execute('SELECT id FROM clients WHERE id = ?', (client_id,)).fetchone():
         return jsonify({'error': {'message': 'Client not found.'}}), 404
-    if 'file' not in request.files:
+    # Frontend sends files under 'files' (plural); also accept 'file' (singular)
+    files = request.files.getlist('files') or request.files.getlist('file')
+    if not files or not files[0].filename:
         return jsonify({'error': {'message': 'No file provided.'}}), 400
-    file = request.files['file']
-    if not file.filename:
-        return jsonify({'error': {'message': 'No file selected.'}}), 400
-    content = file.read().decode('utf-8', errors='replace')
-    cursor = db.execute(
-        'INSERT INTO style_docs (client_id, filename, content) VALUES (?, ?, ?)',
-        (client_id, file.filename, content)
-    )
-    db.commit()
-    row = db.execute(
-        'SELECT id, client_id, filename, created_at FROM style_docs WHERE id = ?',
-        (cursor.lastrowid,)
-    ).fetchone()
-    return jsonify(dict(row)), 201
+    saved = []
+    for file in files:
+        if not file.filename:
+            continue
+        content = file.read().decode('utf-8', errors='replace')
+        cursor = db.execute(
+            'INSERT INTO style_docs (client_id, filename, content) VALUES (?, ?, ?)',
+            (client_id, file.filename, content)
+        )
+        db.commit()
+        row = db.execute(
+            'SELECT id, client_id, filename, created_at FROM style_docs WHERE id = ?',
+            (cursor.lastrowid,)
+        ).fetchone()
+        saved.append(dict(row))
+    return jsonify(saved[0] if len(saved) == 1 else saved), 201
 
 
 @app.route('/api/style-docs/<int:doc_id>', methods=['DELETE'])
