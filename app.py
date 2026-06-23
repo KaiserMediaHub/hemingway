@@ -107,6 +107,19 @@ def update_client(client_id):
     return jsonify(dict(row))
 
 
+@app.route('/api/clients/<int:client_id>/style-rules', methods=['PUT'])
+@require_auth
+def update_style_rules(client_id):
+    data = request.get_json() or {}
+    style_rules = data.get('style_rules', data.get('styleRules', ''))
+    db = get_db()
+    if not db.execute('SELECT id FROM clients WHERE id = ?', (client_id,)).fetchone():
+        return jsonify({'error': {'message': 'Client not found.'}}), 404
+    db.execute('UPDATE clients SET style_rules = ? WHERE id = ?', (style_rules, client_id))
+    db.commit()
+    return jsonify({'ok': True})
+
+
 @app.route('/api/clients/<int:client_id>', methods=['DELETE'])
 @require_auth
 def delete_client(client_id):
