@@ -1,0 +1,711 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Hemingway — Post Writer</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;500&family=Inter:wght@300;400;500;600&display=swap');
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --navy: #1E2355; --navy-dark: #161A40; --navy-mid: #2D3470;
+    --cream: #F7F4EF; --ink: #1A1A18; --ink-mid: #4A4A45;
+    --ink-light: #9A9A92; --border: #DDD9D0; --border-hover: #B8B4AA;
+    --accent-light: #EDEEF7; --accent-mid: #3D4580; --white: #FFFFFF; --red: #8B2020; --green: #1D9E75;
+  }
+  html, body { height: 100%; background: var(--cream); color: var(--ink); font-family: 'Inter', sans-serif; font-size: 14px; line-height: 1.6; }
+  #app { display: none; }
+  #app.visible { display: block; }
+
+  /* ---- Login ---- */
+  #loginScreen { min-height: 100vh; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 24px; }
+  .login-card { background: var(--white); border: 1px solid var(--border); border-radius: 12px; padding: 40px; width: 340px; text-align: center; }
+  .login-logo { background: #0A0B14; border-radius: 8px; padding: 10px 16px; display: inline-flex; margin-bottom: 20px; }
+  .login-logo img { height: 36px; }
+  .login-title { font-family: 'Playfair Display', serif; font-size: 24px; color: var(--navy-dark); margin-bottom: 6px; }
+  .login-sub { font-size: 12px; color: var(--ink-light); margin-bottom: 24px; text-transform: uppercase; letter-spacing: 0.1em; }
+  .login-card input { width: 100%; padding: 12px 14px; border: 1px solid var(--border); border-radius: 6px; font-size: 14px; margin-bottom: 12px; font-family: 'Inter', sans-serif; }
+  .login-card button { width: 100%; padding: 13px; background: var(--navy-dark); color: var(--cream); border: none; border-radius: 8px; font-family: 'Playfair Display', serif; font-size: 15px; cursor: pointer; }
+  .login-card button:hover { background: var(--navy-mid); }
+  .login-error { color: var(--red); font-size: 12px; margin-top: 10px; min-height: 16px; }
+
+  /* ---- Header ---- */
+  header { background: var(--cream); padding: 0 32px; display: flex; align-items: center; justify-content: space-between; height: 68px; border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 100; }
+  .header-left { display: flex; align-items: center; gap: 18px; }
+  .logo-pill { background: #0A0B14; border-radius: 8px; padding: 4px 10px; display: flex; align-items: center; }
+  .logo-pill img { height: 38px; }
+  .header-divider { width: 1px; height: 26px; background: var(--border); }
+  .tool-name { font-family: 'Playfair Display', serif; font-size: 20px; color: var(--navy-dark); }
+  .tool-sub { font-size: 10px; color: var(--ink-light); letter-spacing: 0.12em; text-transform: uppercase; }
+  .logout-btn { font-size: 11px; color: var(--ink-light); background: none; border: 1px solid var(--border); border-radius: 6px; padding: 6px 12px; cursor: pointer; }
+  .logout-btn:hover { color: var(--ink); border-color: var(--border-hover); }
+
+  /* ---- Layout ---- */
+  .layout { display: flex; min-height: calc(100vh - 68px); }
+  .sidebar { width: 260px; border-right: 1px solid var(--border); padding: 24px 16px; flex-shrink: 0; }
+  .main { flex: 1; padding: 28px 32px 80px; max-width: 900px; }
+
+  .eyebrow { font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-light); margin-bottom: 10px; }
+
+  /* ---- Client list ---- */
+  .client-item { padding: 10px 12px; border-radius: 6px; cursor: pointer; font-size: 13px; color: var(--ink-mid); margin-bottom: 2px; display: flex; justify-content: space-between; align-items: center; }
+  .client-item:hover { background: var(--white); }
+  .client-item.active { background: var(--accent-light); color: var(--navy); font-weight: 500; }
+  .client-item .del-x { opacity: 0; font-size: 14px; color: var(--ink-light); }
+  .client-item:hover .del-x { opacity: 1; }
+  .client-item .del-x:hover { color: var(--red); }
+  .add-client-btn { width: 100%; padding: 9px; font-size: 12px; color: var(--ink-mid); background: var(--white); border: 1px dashed var(--border); border-radius: 6px; cursor: pointer; margin-top: 8px; }
+  .add-client-btn:hover { border-color: var(--border-hover); }
+
+  /* ---- Tabs ---- */
+  .tabs { display: flex; gap: 4px; margin-bottom: 24px; border-bottom: 1px solid var(--border); }
+  .tab { padding: 10px 16px; font-size: 13px; font-weight: 500; color: var(--ink-light); cursor: pointer; border-bottom: 2px solid transparent; }
+  .tab.active { color: var(--navy); border-bottom-color: var(--navy); }
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+
+  /* ---- Cards ---- */
+  .card { background: var(--white); border: 1px solid var(--border); border-radius: 8px; padding: 22px; margin-bottom: 18px; }
+  .card-title { font-size: 13px; font-weight: 500; margin-bottom: 4px; }
+  .card-sub { font-size: 12px; color: var(--ink-light); margin-bottom: 14px; }
+  textarea { width: 100%; font-family: 'Inter', sans-serif; font-size: 13px; line-height: 1.6; color: var(--ink); background: var(--cream); border: 1px solid var(--border); border-radius: 6px; padding: 12px 14px; resize: vertical; outline: none; }
+  textarea:focus { border-color: var(--border-hover); }
+
+  /* ---- Style grid ---- */
+  .style-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-bottom: 18px; }
+  .style-card { background: var(--white); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; cursor: pointer; user-select: none; }
+  .style-card:hover { border-color: var(--border-hover); }
+  .style-card.selected { border: 1.5px solid var(--navy); background: var(--accent-light); }
+  .style-card.selected .style-name { color: var(--navy); }
+  .style-name { font-size: 13px; font-weight: 500; margin-bottom: 3px; }
+  .style-desc { font-size: 12px; color: var(--ink-light); line-height: 1.5; }
+
+  .controls-row { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; }
+  .controls-row label { font-size: 12px; color: var(--ink-mid); font-weight: 500; white-space: nowrap; }
+  select { flex: 1; font-family: 'Inter', sans-serif; font-size: 13px; background: var(--white); border: 1px solid var(--border); border-radius: 6px; padding: 9px 12px; cursor: pointer; }
+
+  .btn { padding: 12px 18px; font-family: 'Inter', sans-serif; font-size: 13px; font-weight: 500; border-radius: 6px; cursor: pointer; border: 1px solid var(--border); background: var(--white); color: var(--ink-mid); transition: all 0.15s; }
+  .btn:hover { background: var(--cream); border-color: var(--border-hover); }
+  .btn.primary { width: 100%; padding: 14px; font-family: 'Playfair Display', serif; font-size: 16px; background: var(--navy-dark); color: var(--cream); border: none; }
+  .btn.primary:hover { background: var(--navy-mid); }
+  .btn.primary:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn.success { color: var(--navy); border-color: var(--accent-mid); background: var(--accent-light); }
+  .btn.danger:hover { color: var(--red); border-color: var(--red); }
+
+  .status { font-size: 12px; color: var(--ink-light); margin-top: 10px; min-height: 18px; display: flex; align-items: center; gap: 6px; }
+  .spinner { width: 12px; height: 12px; border: 1.5px solid var(--border); border-top-color: var(--navy); border-radius: 50%; animation: spin 0.7s linear infinite; flex-shrink: 0; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .error-msg { font-size: 12px; color: var(--red); margin-top: 8px; min-height: 16px; }
+  .progress-bar-wrap { width: 100%; background: var(--border); border-radius: 99px; height: 4px; margin-top: 10px; display: none; }
+  .progress-bar-wrap.visible { display: block; }
+  .progress-bar { height: 4px; background: var(--navy); border-radius: 99px; width: 0%; transition: width 0.4s ease; }
+
+  /* ---- Posts ---- */
+  .post-card { background: var(--white); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 20px; overflow: hidden; }
+  .post-header { display: flex; align-items: center; justify-content: space-between; padding: 14px 18px; border-bottom: 1px solid var(--border); background: var(--cream); }
+  .post-title { font-size: 13px; font-weight: 500; color: var(--navy-dark); }
+  .post-num { font-size: 11px; color: var(--ink-light); text-transform: uppercase; letter-spacing: 0.06em; }
+  .post-body { padding: 18px; font-size: 14px; line-height: 1.8; white-space: pre-wrap; min-height: 50px; }
+  .post-body.loading { color: var(--ink-light); font-style: italic; }
+  .post-body p.para { cursor: pointer; padding: 4px 6px; margin: -4px -6px 12px; border-radius: 4px; transition: background 0.12s; }
+  .post-body p.para:hover { background: var(--accent-light); }
+  .post-body p.para:last-child { margin-bottom: 0; }
+  .post-actions { display: flex; gap: 8px; padding: 0 18px 16px; flex-wrap: wrap; }
+  .post-actions .btn { flex: 1; font-size: 11px; padding: 9px; text-transform: uppercase; letter-spacing: 0.04em; }
+
+  .hint-row { font-size: 11px; color: var(--ink-light); padding: 0 18px 14px; }
+
+  /* ---- Style rules / docs ---- */
+  .doc-list { margin-top: 10px; }
+  .doc-item { display: flex; align-items: center; justify-content: space-between; padding: 9px 12px; background: var(--cream); border-radius: 6px; margin-bottom: 6px; font-size: 12px; }
+  .doc-item .doc-name { color: var(--ink-mid); }
+  .doc-item .doc-del { color: var(--ink-light); cursor: pointer; font-size: 13px; }
+  .doc-item .doc-del:hover { color: var(--red); }
+  .upload-zone { border: 1.5px dashed var(--border); border-radius: 8px; padding: 24px; text-align: center; cursor: pointer; color: var(--ink-light); font-size: 13px; }
+  .upload-zone:hover { border-color: var(--border-hover); color: var(--ink-mid); }
+
+  /* ---- History ---- */
+  .history-item { padding: 14px 16px; background: var(--white); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 10px; cursor: pointer; display: flex; justify-content: space-between; align-items: center; }
+  .history-item:hover { border-color: var(--border-hover); }
+  .history-meta { font-size: 12px; color: var(--ink-light); }
+  .history-style { font-size: 13px; font-weight: 500; text-transform: capitalize; }
+
+  .empty-state { text-align: center; padding: 60px 20px; color: var(--ink-light); font-size: 13px; }
+
+  /* ---- Modal ---- */
+  .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(22,26,64,0.4); z-index: 200; align-items: center; justify-content: center; }
+  .modal-overlay.visible { display: flex; }
+  .modal { background: var(--white); border-radius: 10px; padding: 24px; width: 420px; max-width: 90vw; }
+  .modal h3 { font-size: 15px; margin-bottom: 14px; font-family: 'Playfair Display', serif; }
+  .modal input, .modal textarea { width: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; margin-bottom: 12px; font-family: 'Inter', sans-serif; }
+  .modal-actions { display: flex; gap: 8px; justify-content: flex-end; }
+
+  footer { text-align: center; padding: 20px; font-size: 11px; color: var(--ink-light); letter-spacing: 0.06em; text-transform: uppercase; border-top: 1px solid var(--border); }
+</style>
+</head>
+<body>
+
+<!-- ================= LOGIN ================= -->
+<div id="loginScreen">
+  <div class="login-card">
+    <div class="login-logo"><img src="/assets/kmg-logo.png" alt="KMG" /></div>
+    <div class="login-title">Hemingway</div>
+    <div class="login-sub">Post Writer</div>
+    <input type="password" id="loginPassword" placeholder="Team password" />
+    <button onclick="login()">Enter</button>
+    <div class="login-error" id="loginError"></div>
+  </div>
+</div>
+
+<!-- ================= APP ================= -->
+<div id="app">
+  <header>
+    <div class="header-left">
+      <div class="logo-pill"><img src="/assets/kmg-logo.png" alt="Kaiser Media Group" /></div>
+      <div class="header-divider"></div>
+      <div>
+        <div class="tool-name">Hemingway</div>
+        <div class="tool-sub">Post Writer</div>
+      </div>
+    </div>
+    <button class="logout-btn" onclick="logout()">Log out</button>
+  </header>
+
+  <div class="layout">
+    <div class="sidebar">
+      <div class="eyebrow">Clients</div>
+      <div id="clientList"></div>
+      <button class="add-client-btn" onclick="openAddClientModal()">+ Add client</button>
+    </div>
+
+    <div class="main">
+      <div id="noClientState" class="empty-state">Select or add a client to get started.</div>
+
+      <div id="clientPanel" style="display:none;">
+        <div class="tabs">
+          <div class="tab active" data-tab="write" onclick="switchTab('write')">Write Posts</div>
+          <div class="tab" data-tab="style" onclick="switchTab('style')">Style & Voice</div>
+          <div class="tab" data-tab="history" onclick="switchTab('history')">History</div>
+        </div>
+
+        <!-- ===== WRITE TAB ===== -->
+        <div class="tab-panel active" id="tab-write">
+          <div class="card">
+            <div class="card-title">Full transcript</div>
+            <div class="card-sub">Paste your full Degas transcript here. Hemingway detects each video and writes one LinkedIn post per video — all at once.</div>
+            <textarea id="corpus" rows="10" placeholder="Paste your Degas transcript here..."></textarea>
+          </div>
+
+          <div class="card">
+            <div class="card-title">Context for this batch <span style="font-weight:400; color:var(--ink-light);">(optional)</span></div>
+            <div class="card-sub">Anything the writer should know about this specific run — a campaign, an announcement, a deadline, a reason these are going out now. This applies only to this batch, not saved permanently for the client.</div>
+            <textarea id="batchContext" rows="3" placeholder="e.g. These are launching alongside our new patient intake process. Lean into urgency without being salesy."></textarea>
+          </div>
+
+          <div class="eyebrow">Writing style</div>
+          <div class="style-grid">
+            <div class="style-card selected" data-style="thought-leader" onclick="selectStyle(this)">
+              <div class="style-name">Thought Leader</div>
+              <div class="style-desc">Bold, opinionated, authoritative. Built for credibility and reach.</div>
+            </div>
+            <div class="style-card" data-style="conversational" onclick="selectStyle(this)">
+              <div class="style-name">Conversational</div>
+              <div class="style-desc">Warm, direct, like talking to a smart friend.</div>
+            </div>
+            <div class="style-card" data-style="storyteller" onclick="selectStyle(this)">
+              <div class="style-name">Storyteller</div>
+              <div class="style-desc">Narrative-driven, scene-setting, strong hook.</div>
+            </div>
+            <div class="style-card" data-style="punchy" onclick="selectStyle(this)">
+              <div class="style-name">Punchy & Direct</div>
+              <div class="style-desc">Short sentences. High contrast. No filler.</div>
+            </div>
+          </div>
+
+          <div class="controls-row">
+            <label for="length">Post length</label>
+            <select id="length">
+              <option value="short">Short — 3 to 5 focused paragraphs</option>
+              <option value="medium" selected>Medium — 5 to 8 paragraphs</option>
+              <option value="long">Long — full narrative, 8+ paragraphs</option>
+            </select>
+          </div>
+
+          <button class="btn primary" id="genBtn" onclick="generate()">Write All Posts</button>
+          <div class="status" id="status"></div>
+          <div class="progress-bar-wrap" id="progressWrap"><div class="progress-bar" id="progressBar"></div></div>
+          <div class="error-msg" id="errorMsg"></div>
+
+          <div id="postsSection" style="margin-top:28px; display:none;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px;">
+              <div class="eyebrow" style="margin-bottom:0;">Generated posts</div>
+              <button class="btn" style="font-size:11px; padding:8px 14px;" onclick="saveAll()">Save all as .txt</button>
+            </div>
+            <div id="postsContainer"></div>
+          </div>
+        </div>
+
+        <!-- ===== STYLE TAB ===== -->
+        <div class="tab-panel" id="tab-style">
+          <div class="card">
+            <div class="card-title">Style rules</div>
+            <div class="card-sub">Plain-language do's and don'ts for this client, one per line. Example: "Don't use the phrase 'last forty years'." These are injected into every post written for this client.</div>
+            <textarea id="styleRules" rows="8" placeholder="- Don't use the phrase 'last forty years'&#10;- Avoid medical jargon, explain things simply&#10;- Keep sentences under 20 words when possible"></textarea>
+            <button class="btn" style="margin-top:10px;" onclick="saveStyleRules()">Save style rules</button>
+            <span class="status" id="styleRulesStatus" style="display:inline-flex; margin-left:10px;"></span>
+          </div>
+
+          <div class="card">
+            <div class="card-title">Reference copy</div>
+            <div class="card-sub">Upload past posts or writing samples from this client (.txt or .md). Hemingway studies these to match voice and vocabulary more precisely.</div>
+            <div class="upload-zone" onclick="document.getElementById('fileInput').click()">Click to upload .txt or .md files</div>
+            <input type="file" id="fileInput" multiple accept=".txt,.md" style="display:none;" onchange="uploadDocs(this.files)" />
+            <div class="doc-list" id="docList"></div>
+          </div>
+        </div>
+
+        <!-- ===== HISTORY TAB ===== -->
+        <div class="tab-panel" id="tab-history">
+          <div id="historyList"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <footer>Hemingway &nbsp;&mdash;&nbsp; Kaiser Media Group &nbsp;&mdash;&nbsp; LinkedIn Post Writer</footer>
+</div>
+
+<!-- ===== Add client modal ===== -->
+<div class="modal-overlay" id="addClientModal">
+  <div class="modal">
+    <h3>Add a client</h3>
+    <input type="text" id="newClientName" placeholder="Client name (e.g. Epiphany)" />
+    <div class="modal-actions">
+      <button class="btn" onclick="closeAddClientModal()">Cancel</button>
+      <button class="btn primary" style="width:auto; padding:10px 16px; font-size:13px;" onclick="addClient()">Add</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== Paragraph rewrite modal ===== -->
+<div class="modal-overlay" id="paraModal">
+  <div class="modal">
+    <h3>Rewrite this paragraph</h3>
+    <textarea id="paraInstruction" rows="3" placeholder="Optional: tell Hemingway how to change it (e.g. 'make it punchier' or 'shorten this')"></textarea>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeParaModal()">Cancel</button>
+      <button class="btn primary" id="paraSubmitBtn" style="width:auto; padding:10px 16px; font-size:13px;" onclick="submitParaRewrite()">Rewrite</button>
+    </div>
+  </div>
+</div>
+
+<script>
+let currentClientId = null;
+let allPosts = [];
+let allTitles = [];
+let selectedStyle = 'thought-leader';
+let paraTarget = { postId: null, index: null };
+
+// ---------- Auth ----------
+async function checkSession() {
+  const res = await fetch('/api/session');
+  const data = await res.json();
+  if (data.loggedIn) {
+    document.getElementById('loginScreen').style.display = 'none';
+    document.getElementById('app').classList.add('visible');
+    loadClients();
+  }
+}
+
+async function login() {
+  const password = document.getElementById('loginPassword').value;
+  const errorEl = document.getElementById('loginError');
+  errorEl.textContent = '';
+  try {
+    const res = await fetch('/api/login', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ password })
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      errorEl.textContent = err.error?.message || 'Login failed';
+      return;
+    }
+    document.getElementById('loginScreen').style.display = 'none';
+    document.getElementById('app').classList.add('visible');
+    loadClients();
+  } catch (e) {
+    errorEl.textContent = 'Could not reach server.';
+  }
+}
+document.getElementById('loginPassword').addEventListener('keydown', e => { if (e.key === 'Enter') login(); });
+
+async function logout() {
+  await fetch('/api/logout', { method: 'POST' });
+  location.reload();
+}
+
+// ---------- Clients ----------
+async function loadClients() {
+  const res = await fetch('/api/clients');
+  const clients = await res.json();
+  const list = document.getElementById('clientList');
+  list.innerHTML = '';
+  clients.forEach(c => {
+    const item = document.createElement('div');
+    item.className = 'client-item' + (c.id === currentClientId ? ' active' : '');
+    item.innerHTML = '<span>' + escapeHtml(c.name) + '</span><span class="del-x" onclick="event.stopPropagation(); deleteClient(' + c.id + ')">&times;</span>';
+    item.onclick = () => selectClient(c.id, c.name, c.style_rules);
+    list.appendChild(item);
+  });
+  if (clients.length === 0) {
+    document.getElementById('noClientState').style.display = 'block';
+  }
+}
+
+function openAddClientModal() {
+  document.getElementById('addClientModal').classList.add('visible');
+  document.getElementById('newClientName').focus();
+}
+function closeAddClientModal() {
+  document.getElementById('addClientModal').classList.remove('visible');
+  document.getElementById('newClientName').value = '';
+}
+async function addClient() {
+  const name = document.getElementById('newClientName').value.trim();
+  if (!name) return;
+  const res = await fetch('/api/clients', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ name })
+  });
+  const client = await res.json();
+  closeAddClientModal();
+  await loadClients();
+  selectClient(client.id, client.name, '');
+}
+async function deleteClient(id) {
+  if (!confirm('Delete this client and all their saved posts? This cannot be undone.')) return;
+  await fetch('/api/clients/' + id, { method: 'DELETE' });
+  if (currentClientId === id) {
+    currentClientId = null;
+    document.getElementById('clientPanel').style.display = 'none';
+    document.getElementById('noClientState').style.display = 'block';
+  }
+  loadClients();
+}
+
+function selectClient(id, name, styleRules) {
+  currentClientId = id;
+  document.getElementById('noClientState').style.display = 'none';
+  document.getElementById('clientPanel').style.display = 'block';
+  document.getElementById('styleRules').value = styleRules || '';
+  document.getElementById('postsSection').style.display = 'none';
+  document.getElementById('errorMsg').textContent = '';
+  loadClients();
+  loadDocs();
+  loadHistory();
+}
+
+// ---------- Tabs ----------
+function switchTab(tab) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+  document.getElementById('tab-' + tab).classList.add('active');
+  if (tab === 'history') loadHistory();
+}
+
+// ---------- Style rules ----------
+async function saveStyleRules() {
+  const rules = document.getElementById('styleRules').value;
+  await fetch('/api/clients/' + currentClientId + '/style-rules', {
+    method: 'PUT', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ style_rules: rules })
+  });
+  const status = document.getElementById('styleRulesStatus');
+  status.textContent = 'Saved';
+  setTimeout(() => status.textContent = '', 2000);
+}
+
+// ---------- Style docs ----------
+async function loadDocs() {
+  const res = await fetch('/api/clients/' + currentClientId + '/docs');
+  const docs = await res.json();
+  const list = document.getElementById('docList');
+  list.innerHTML = '';
+  docs.forEach(d => {
+    const item = document.createElement('div');
+    item.className = 'doc-item';
+    item.innerHTML = '<span class="doc-name">' + escapeHtml(d.filename) + '</span><span class="doc-del" onclick="deleteDoc(' + d.id + ')">&times;</span>';
+    list.appendChild(item);
+  });
+}
+async function uploadDocs(files) {
+  const formData = new FormData();
+  for (const f of files) formData.append('files', f);
+  await fetch('/api/clients/' + currentClientId + '/docs', { method: 'POST', body: formData });
+  document.getElementById('fileInput').value = '';
+  loadDocs();
+}
+async function deleteDoc(id) {
+  await fetch('/api/docs/' + id, { method: 'DELETE' });
+  loadDocs();
+}
+
+// ---------- Style selection ----------
+function selectStyle(el) {
+  document.querySelectorAll('.style-card').forEach(c => c.classList.remove('selected'));
+  el.classList.add('selected');
+  selectedStyle = el.dataset.style;
+}
+
+// ---------- Generate ----------
+function buildPostCard(index, title) {
+  const card = document.createElement('div');
+  card.className = 'post-card';
+  card.id = 'post-card-' + index;
+  card.innerHTML =
+    '<div class="post-header"><div class="post-title">' + escapeHtml(title) + '</div><div class="post-num">Post ' + (index + 1) + '</div></div>' +
+    '<div class="post-body loading" id="post-body-' + index + '">Writing post...</div>' +
+    '<div class="post-actions" id="post-actions-' + index + '" style="display:none;">' +
+      '<button class="btn" id="copy-' + index + '" onclick="copyPost(' + index + ')">Copy</button>' +
+      '<button class="btn" id="save-' + index + '" onclick="savePost(' + index + ')">Save .txt</button>' +
+      '<button class="btn" id="orca-' + index + '" onclick="copyForOrca(' + index + ')">Copy for Hey Orca</button>' +
+      '<button class="btn" onclick="rewritePost(' + index + ')">Rewrite</button>' +
+    '</div>' +
+    '<div class="hint-row" id="hint-' + index + '" style="display:none;">Click any paragraph to rewrite just that part.</div>';
+  return card;
+}
+
+function renderPostBody(index, text, postId) {
+  const bodyEl = document.getElementById('post-body-' + index);
+  bodyEl.classList.remove('loading');
+  bodyEl.innerHTML = '';
+  const paragraphs = text.split(/\n\n+/);
+  paragraphs.forEach((para, pIdx) => {
+    const p = document.createElement('p');
+    p.className = 'para';
+    p.textContent = para;
+    p.onclick = () => openParaModal(postId, pIdx, index);
+    bodyEl.appendChild(p);
+  });
+  document.getElementById('hint-' + index).style.display = 'block';
+}
+
+async function generate() {
+  const corpus = document.getElementById('corpus').value.trim();
+  const length = document.getElementById('length').value;
+  const batchContext = document.getElementById('batchContext').value.trim();
+  const errorMsg = document.getElementById('errorMsg');
+  errorMsg.textContent = '';
+
+  if (!corpus) { errorMsg.textContent = 'Please paste your transcript first.'; return; }
+  if (!currentClientId) { errorMsg.textContent = 'Select a client first.'; return; }
+
+  document.getElementById('genBtn').disabled = true;
+  document.getElementById('postsSection').style.display = 'block';
+  document.getElementById('progressWrap').classList.add('visible');
+  document.getElementById('status').innerHTML = '<div class="spinner"></div> Writing posts...';
+
+  const container = document.getElementById('postsContainer');
+  container.innerHTML = '';
+
+  try {
+    const res = await fetch('/api/generate', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ clientId: currentClientId, transcript: corpus, style: selectedStyle, length, context: batchContext })
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error?.message || 'Generation failed');
+    }
+    const data = await res.json();
+    allPosts = data.posts.map(p => p.body);
+    allTitles = data.posts.map(p => p.title);
+
+    data.posts.forEach((p, i) => {
+      const card = buildPostCard(i, p.title);
+      container.appendChild(card);
+      if (p.error) {
+        document.getElementById('post-body-' + i).textContent = 'Error: ' + p.error;
+        document.getElementById('post-body-' + i).classList.remove('loading');
+      } else {
+        renderPostBody(i, p.body, p.id);
+        document.getElementById('post-actions-' + i).style.display = 'flex';
+        document.getElementById('post-card-' + i).dataset.postId = p.id;
+      }
+    });
+
+    document.getElementById('progressBar').style.width = '100%';
+    document.getElementById('status').textContent = 'Done — ' + data.posts.length + ' post' + (data.posts.length !== 1 ? 's' : '') + ' written.';
+  } catch (err) {
+    errorMsg.textContent = err.message;
+    document.getElementById('status').textContent = '';
+  }
+
+  document.getElementById('genBtn').disabled = false;
+}
+
+async function rewritePost(index) {
+  const card = document.getElementById('post-card-' + index);
+  const postId = card.dataset.postId;
+  if (!postId) return;
+  const bodyEl = document.getElementById('post-body-' + index);
+  bodyEl.classList.add('loading');
+  bodyEl.textContent = 'Rewriting...';
+  document.getElementById('post-actions-' + index).style.display = 'none';
+
+  try {
+    const res = await fetch('/api/posts/' + postId + '/rewrite', {
+      method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({})
+    });
+    if (!res.ok) { const err = await res.json(); throw new Error(err.error?.message); }
+    const data = await res.json();
+    allPosts[index] = data.body;
+    renderPostBody(index, data.body, postId);
+    document.getElementById('post-actions-' + index).style.display = 'flex';
+  } catch (err) {
+    bodyEl.textContent = 'Error: ' + err.message;
+    bodyEl.classList.remove('loading');
+  }
+}
+
+// ---------- Paragraph rewrite ----------
+function openParaModal(postId, paraIndex, cardIndex) {
+  paraTarget = { postId, index: paraIndex, cardIndex };
+  document.getElementById('paraInstruction').value = '';
+  document.getElementById('paraModal').classList.add('visible');
+}
+function closeParaModal() {
+  document.getElementById('paraModal').classList.remove('visible');
+}
+async function submitParaRewrite() {
+  const instruction = document.getElementById('paraInstruction').value;
+  const btn = document.getElementById('paraSubmitBtn');
+  btn.disabled = true; btn.textContent = 'Rewriting...';
+
+  try {
+    const res = await fetch('/api/posts/' + paraTarget.postId + '/rewrite-paragraph', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ paragraphIndex: paraTarget.index, instruction })
+    });
+    if (!res.ok) { const err = await res.json(); throw new Error(err.error?.message); }
+    const data = await res.json();
+    allPosts[paraTarget.cardIndex] = data.body;
+    renderPostBody(paraTarget.cardIndex, data.body, paraTarget.postId);
+  } catch (err) {
+    alert('Could not rewrite paragraph: ' + err.message);
+  }
+
+  btn.disabled = false; btn.textContent = 'Rewrite';
+  closeParaModal();
+}
+
+// ---------- Copy / save ----------
+function copyPost(index) {
+  navigator.clipboard.writeText(allPosts[index]).then(() => flashBtn('copy-' + index, 'Copied'));
+}
+function copyForOrca(index) {
+  // Hey Orca-friendly plain text format: just the body, no markdown artifacts
+  const clean = allPosts[index].replace(/\\*\\*/g, '').replace(/\\*/g, '');
+  navigator.clipboard.writeText(clean).then(() => flashBtn('orca-' + index, 'Copied'));
+}
+function savePost(index) {
+  const stamp = new Date().toISOString().slice(0,10);
+  const safe = (allTitles[index] || 'post').replace(/[^a-z0-9]/gi,'-').toLowerCase().slice(0,40);
+  downloadText(allPosts[index], 'hemingway-' + safe + '-' + stamp + '.txt');
+  flashBtn('save-' + index, 'Saved');
+}
+function saveAll() {
+  const stamp = new Date().toISOString().slice(0,10);
+  const combined = allPosts.map((p,i) => '=== POST ' + (i+1) + ': ' + (allTitles[i]||'') + ' ===\n\n' + p).join('\n\n' + '='.repeat(60) + '\n\n');
+  downloadText(combined, 'hemingway-all-posts-' + stamp + '.txt');
+}
+function downloadText(text, filename) {
+  const blob = new Blob([text], { type: 'text/plain' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = filename;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+}
+function flashBtn(id, label) {
+  const btn = document.getElementById(id);
+  if (!btn) return;
+  const original = btn.textContent;
+  btn.textContent = label;
+  btn.classList.add('success');
+  setTimeout(() => { btn.textContent = original; btn.classList.remove('success'); }, 2000);
+}
+
+// ---------- History ----------
+async function loadHistory() {
+  if (!currentClientId) return;
+  const res = await fetch('/api/clients/' + currentClientId + '/batches');
+  const batches = await res.json();
+  const list = document.getElementById('historyList');
+  list.innerHTML = '';
+  if (batches.length === 0) {
+    list.innerHTML = '<div class="empty-state">No saved batches yet for this client.</div>';
+    return;
+  }
+  batches.forEach(b => {
+    const item = document.createElement('div');
+    item.className = 'history-item';
+    const date = new Date(b.created_at).toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' });
+    item.innerHTML =
+      '<div><div class="history-style">' + b.style.replace('-', ' ') + '</div><div class="history-meta">' + date + ' &middot; ' + b.length + ' length</div></div>' +
+      '<button class="btn danger" style="font-size:11px;" onclick="event.stopPropagation(); deleteBatch(' + b.id + ')">Delete</button>';
+    item.onclick = () => loadBatchIntoView(b.id);
+    list.appendChild(item);
+  });
+}
+async function loadBatchIntoView(batchId) {
+  const [batchRes, postsRes] = await Promise.all([
+    fetch('/api/batches/' + batchId),
+    fetch('/api/batches/' + batchId + '/posts')
+  ]);
+  const batch = await batchRes.json();
+  const posts = await postsRes.json();
+
+  switchTab('write');
+  document.querySelector('.tab[data-tab="write"]').classList.add('active');
+  document.querySelector('.tab[data-tab="history"]').classList.remove('active');
+  document.getElementById('tab-write').classList.add('active');
+  document.getElementById('tab-history').classList.remove('active');
+
+  // Restore the inputs that produced this batch
+  document.getElementById('corpus').value = batch.transcript_raw || '';
+  document.getElementById('batchContext').value = batch.context || '';
+  document.getElementById('length').value = batch.length || 'medium';
+  document.querySelectorAll('.style-card').forEach(c => {
+    c.classList.toggle('selected', c.dataset.style === batch.style);
+  });
+  if (batch.style) selectedStyle = batch.style;
+
+  allPosts = posts.map(p => p.body);
+  allTitles = posts.map(p => p.title);
+  document.getElementById('postsSection').style.display = 'block';
+  const container = document.getElementById('postsContainer');
+  container.innerHTML = '';
+  posts.forEach((p, i) => {
+    const card = buildPostCard(i, p.title);
+    container.appendChild(card);
+    renderPostBody(i, p.body, p.id);
+    document.getElementById('post-actions-' + i).style.display = 'flex';
+    document.getElementById('post-card-' + i).dataset.postId = p.id;
+  });
+}
+async function deleteBatch(id) {
+  if (!confirm('Delete this batch of posts? This cannot be undone.')) return;
+  await fetch('/api/batches/' + id, { method: 'DELETE' });
+  loadHistory();
+}
+
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+checkSession();
+</script>
+</body>
+</html>
