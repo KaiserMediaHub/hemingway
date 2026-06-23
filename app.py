@@ -132,6 +132,7 @@ def delete_client(client_id):
 # ---------- Style Docs ----------
 
 @app.route('/api/clients/<int:client_id>/style-docs', methods=['GET'])
+@app.route('/api/clients/<int:client_id>/docs', methods=['GET'])
 @require_auth
 def get_style_docs(client_id):
     db = get_db()
@@ -172,6 +173,7 @@ def upload_style_doc(client_id):
 
 
 @app.route('/api/style-docs/<int:doc_id>', methods=['DELETE'])
+@app.route('/api/docs/<int:doc_id>', methods=['DELETE'])
 @require_auth
 def delete_style_doc(doc_id):
     db = get_db()
