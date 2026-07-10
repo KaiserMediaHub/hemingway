@@ -246,7 +246,7 @@ def write_post_for_section(title, section_body, full_corpus, style, length, clie
     system = build_system_prompt(style, client_rules)
     user = build_user_prompt(title, section_body, full_corpus, length, style_docs_text, batch_context)
     return call_anthropic(
-        model='claude-sonnet-4-20250514',
+        model='claude-sonnet-4-5',
         max_tokens=1200,
         system=system,
         messages=[{'role': 'user', 'content': user}]
@@ -386,7 +386,7 @@ def rewrite_paragraph(post_id):
 
     try:
         result = call_anthropic(
-            model='claude-sonnet-4-20250514',
+            model='claude-sonnet-4-5',
             max_tokens=400,
             system=system,
             messages=[{'role': 'user', 'content': user}]
