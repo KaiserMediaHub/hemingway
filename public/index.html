@@ -225,6 +225,12 @@
             </select>
           </div>
 
+          <div class="card" style="margin-top:18px;">
+            <div class="card-title">Context <span style="font-weight:400; color:var(--ink-light);">(optional)</span></div>
+            <div class="card-sub">Who is speaking and what is this post about? Any background that helps Hemingway write a better post — the speaker's role, the topic, the campaign, the timing.</div>
+            <textarea id="context" rows="3" placeholder="e.g. John is the CEO of a logistics company. These videos are from a keynote he gave at a supply chain conference in March. The posts will run during Q2 to support their new product launch."></textarea>
+          </div>
+
           <button class="btn primary" id="genBtn" onclick="generate()">Write All Posts</button>
           <div class="status" id="status"></div>
           <div class="progress-bar-wrap" id="progressWrap"><div class="progress-bar" id="progressBar"></div></div>
@@ -505,7 +511,7 @@ async function generate() {
   try {
     const res = await fetch('/api/generate', {
       method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ clientId: currentClientId, transcript: corpus, style: selectedStyle, length })
+      body: JSON.stringify({ clientId: currentClientId, transcript: corpus, style: selectedStyle, length, context: document.getElementById('context').value.trim() })
     });
     if (!res.ok) {
       const err = await res.json();
