@@ -29,6 +29,10 @@ STYLE_PROMPTS = {
 }
 
 LENGTH_INSTRUCTIONS = {
+    'super-short': (
+        'Write an extremely short post of 1 to 3 sentences only. One punchy idea. '
+        'No buildup, no closing line, no hashtags. Just the sharpest possible version of the core point.'
+    ),
     'short': (
         'Write a short post of 3 to 5 focused paragraphs. Get in, say the thing, get out. '
         'Every word must be there for a reason.'
