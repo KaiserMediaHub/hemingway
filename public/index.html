@@ -226,6 +226,12 @@
           </div>
 
           <div class="card" style="margin-top:18px;">
+            <div class="card-title">Batch name <span style="font-weight:400; color:var(--ink-light);">(optional)</span></div>
+            <div class="card-sub">Give this batch a name so you can find it in History later.</div>
+            <input type="text" id="batchName" placeholder="e.g. John Smith — Supply Chain Keynote March 2026" style="width:100%; padding:10px 12px; border:1px solid var(--border); border-radius:6px; font-family:'Inter',sans-serif; font-size:13px;" />
+          </div>
+
+          <div class="card" style="margin-top:18px;">
             <div class="card-title">Context <span style="font-weight:400; color:var(--ink-light);">(optional)</span></div>
             <div class="card-sub">Who is speaking and what is this post about? Any background that helps Hemingway write a better post — the speaker's role, the topic, the campaign, the timing.</div>
             <textarea id="context" rows="3" placeholder="e.g. John is the CEO of a logistics company. These videos are from a keynote he gave at a supply chain conference in March. The posts will run during Q2 to support their new product launch."></textarea>
@@ -511,7 +517,7 @@ async function generate() {
   try {
     const res = await fetch('/api/generate', {
       method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ clientId: currentClientId, transcript: corpus, style: selectedStyle, length, context: document.getElementById('context').value.trim() })
+      body: JSON.stringify({ clientId: currentClientId, transcript: corpus, style: selectedStyle, length, context: document.getElementById('context').value.trim(), name: document.getElementById('batchName').value.trim() })
     });
     if (!res.ok) {
       const err = await res.json();
@@ -650,7 +656,7 @@ async function loadHistory() {
     item.className = 'history-item';
     const date = new Date(b.created_at).toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' });
     item.innerHTML =
-      '<div><div class="history-style">' + b.style.replace('-', ' ') + '</div><div class="history-meta">' + date + ' &middot; ' + b.length + ' length</div></div>' +
+      '<div><div class="history-style">' + (b.name || b.style.replace('-', ' ')) + '</div><div class="history-meta">' + date + ' &middot; ' + b.style.replace('-', ' ') + ' &middot; ' + b.length + '</div></div>' +
       '<button class="btn danger" style="font-size:11px;" onclick="event.stopPropagation(); deleteBatch(' + b.id + ')">Delete</button>';
     item.onclick = () => loadBatchIntoView(b.id);
     list.appendChild(item);

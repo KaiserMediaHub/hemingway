@@ -52,6 +52,12 @@ CREATE TABLE IF NOT EXISTS posts (
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     conn.executescript(SCHEMA)
+    # Migration: add 'name' column to batches if it doesn't exist yet
+    try:
+        conn.execute("ALTER TABLE batches ADD COLUMN name TEXT DEFAULT ''")
+        conn.commit()
+    except Exception:
+        pass  # column already exists
     conn.close()
 
 

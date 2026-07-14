@@ -189,7 +189,7 @@ def delete_style_doc(doc_id):
 def get_batches(client_id):
     db = get_db()
     rows = db.execute(
-        'SELECT id, style, length, context, created_at FROM batches WHERE client_id = ? ORDER BY created_at DESC',
+        'SELECT id, name, style, length, context, created_at FROM batches WHERE client_id = ? ORDER BY created_at DESC',
         (client_id,)
     ).fetchall()
     return jsonify([dict(r) for r in rows])
@@ -200,7 +200,7 @@ def get_batches(client_id):
 def get_batch(batch_id):
     db = get_db()
     row = db.execute(
-        'SELECT id, client_id, transcript_raw, style, length, context, created_at FROM batches WHERE id = ?',
+        'SELECT id, client_id, transcript_raw, name, style, length, context, created_at FROM batches WHERE id = ?',
         (batch_id,)
     ).fetchone()
     if not row:
@@ -267,6 +267,7 @@ def generate():
     style = data.get('style')
     length = data.get('length')
     context = data.get('context', '')
+    name = data.get('name', '').strip()
 
     if not all([client_id, transcript, style, length]):
         return jsonify({'error': {'message': 'Missing required fields.'}}), 400
@@ -284,8 +285,8 @@ def generate():
     style_docs_text = '\n\n---\n\n'.join(r['content'] for r in docs)
 
     cursor = db.execute(
-        'INSERT INTO batches (client_id, transcript_raw, style, length, context) VALUES (?, ?, ?, ?, ?)',
-        (client_id, transcript, style, length, context)
+        'INSERT INTO batches (client_id, transcript_raw, name, style, length, context) VALUES (?, ?, ?, ?, ?, ?)',
+        (client_id, transcript, name, style, length, context)
     )
     db.commit()
     batch_id = cursor.lastrowid
