@@ -1,6 +1,7 @@
 import os
+import json
 from functools import wraps
-from flask import Flask, request, session, jsonify, send_from_directory
+from flask import Flask, request, session, jsonify, send_from_directory, Response, stream_with_context
 from dotenv import load_dotenv
 import anthropic as anthropic_sdk
 from db import init_db, get_db, close_db
@@ -253,7 +254,7 @@ def write_post_for_section(title, section_body, full_corpus, style, length, clie
     )
 
 
-# ---------- Generate ----------
+# ---------- Generate (streaming) ----------
 
 @app.route('/api/generate', methods=['POST'])
 @require_auth
@@ -283,6 +284,7 @@ def generate():
 
     docs = db.execute('SELECT content FROM style_docs WHERE client_id = ?', (client_id,)).fetchall()
     style_docs_text = '\n\n---\n\n'.join(r['content'] for r in docs)
+    client_rules = client['style_rules'] or ''
 
     cursor = db.execute(
         'INSERT INTO batches (client_id, transcript_raw, name, style, length, context) VALUES (?, ?, ?, ?, ?, ?)',
@@ -291,24 +293,29 @@ def generate():
     db.commit()
     batch_id = cursor.lastrowid
 
-    results = []
-    for sec in sections:
-        try:
-            post = write_post_for_section(
-                sec['title'], sec['body'], transcript,
-                style, length, client['style_rules'] or '',
-                style_docs_text, context
-            )
-            post_cursor = db.execute(
-                'INSERT INTO posts (batch_id, title, body, section_body) VALUES (?, ?, ?, ?)',
-                (batch_id, sec['title'], post, sec['body'])
-            )
-            db.commit()
-            results.append({'id': post_cursor.lastrowid, 'title': sec['title'], 'body': post, 'error': None})
-        except Exception as e:
-            results.append({'id': None, 'title': sec['title'], 'body': '', 'error': str(e)})
+    def stream():
+        yield json.dumps({'type': 'start', 'batchId': batch_id, 'total': len(sections)}) + '\n'
+        for i, sec in enumerate(sections):
+            try:
+                post = write_post_for_section(
+                    sec['title'], sec['body'], transcript,
+                    style, length, client_rules,
+                    style_docs_text, context
+                )
+                post_cursor = db.execute(
+                    'INSERT INTO posts (batch_id, title, body, section_body) VALUES (?, ?, ?, ?)',
+                    (batch_id, sec['title'], post, sec['body'])
+                )
+                db.commit()
+                yield json.dumps({'type': 'post', 'index': i, 'id': post_cursor.lastrowid, 'title': sec['title'], 'body': post, 'error': None}) + '\n'
+            except Exception as e:
+                yield json.dumps({'type': 'post', 'index': i, 'id': None, 'title': sec['title'], 'body': '', 'error': str(e)}) + '\n'
+        yield json.dumps({'type': 'done'}) + '\n'
 
-    return jsonify({'batchId': batch_id, 'posts': results})
+    resp = Response(stream_with_context(stream()), mimetype='application/x-ndjson')
+    resp.headers['X-Accel-Buffering'] = 'no'
+    resp.headers['Cache-Control'] = 'no-cache'
+    return resp
 
 
 # ---------- Rewrite ----------
@@ -400,7 +407,6 @@ def rewrite_paragraph(post_id):
         return jsonify({'id': post_id, 'body': new_body, 'paragraph': new_paragraph})
     except Exception as e:
         return jsonify({'error': {'message': str(e)}}), 500
-
 
 # ---------- Serve frontend ----------
 
