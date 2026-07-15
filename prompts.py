@@ -65,17 +65,18 @@ def build_system_prompt(style, client_rules):
         'entrepreneurs, and subject matter experts. Your singular obsession is quality: posts that '
         'feel completely human, never AI-generated, never generic.\n\n'
         f'{STYLE_PROMPTS.get(style, STYLE_PROMPTS["thought-leader"])}\n\n'
-        f'{BASE_RULES}'
     )
     if client_rules and client_rules.strip():
         base += (
-            '\n\nADDITIONAL CLIENT-SPECIFIC RULES — these override or add to the rules above. '
-            f'Follow them exactly:\n{client_rules.strip()}'
+            'CLIENT-SPECIFIC RULES — read these carefully before writing anything. '
+            'These take priority over everything else. Follow every instruction exactly:\n\n'
+            f'{client_rules.strip()}\n\n'
         )
+    base += BASE_RULES
     return base
 
 
-def build_user_prompt(title, section_body, full_corpus, length, style_docs_text, batch_context):
+def build_user_prompt(title, section_body, full_corpus, length, style_docs_text, batch_context, client_rules=''):
     prompt = (
         'FULL TRANSCRIPT CORPUS: Read this to understand how this speaker communicates. '
         'Do not pull content from other videos for this post.\n\n'
@@ -110,6 +111,15 @@ def build_user_prompt(title, section_body, full_corpus, length, style_docs_text,
         f'{section_body[:3500]}\n'
         '---\n\n'
         f'{LENGTH_INSTRUCTIONS.get(length, LENGTH_INSTRUCTIONS["medium"])}\n\n'
+    )
+
+    if client_rules and client_rules.strip():
+        prompt += (
+            f'REMINDER — before you write, re-read the client-specific rules in the system prompt '
+            f'and make sure every single one is followed in this post.\n\n'
+        )
+
+    prompt += (
         'Write one LinkedIn post based solely on this video section. '
         'Output only the finished post with no preamble or explanation.'
     )

@@ -244,7 +244,7 @@ def call_anthropic(model, max_tokens, system, messages):
 
 def write_post_for_section(title, section_body, full_corpus, style, length, client_rules, style_docs_text, batch_context):
     system = build_system_prompt(style, client_rules)
-    user = build_user_prompt(title, section_body, full_corpus, length, style_docs_text, batch_context)
+    user = build_user_prompt(title, section_body, full_corpus, length, style_docs_text, batch_context, client_rules)
     return call_anthropic(
         model='claude-sonnet-4-5',
         max_tokens=1200,
