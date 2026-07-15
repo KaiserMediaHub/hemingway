@@ -287,6 +287,15 @@ def generate():
     style_docs_text = '\n\n---\n\n'.join(r['content'] for r in docs)
     client_rules = client['style_rules'] or ''
 
+    # Cap the voice-context corpus at 10 sections to control token costs on large batches.
+    # The model only needs a sample to learn the speaker's voice — all 40+ sections is wasteful.
+    CORPUS_SECTION_CAP = 10
+    if len(sections) > CORPUS_SECTION_CAP:
+        capped_sections = sections[:CORPUS_SECTION_CAP]
+        corpus_for_context = '\n\n'.join(f"VIDEO: {s['title']}\n{s['body']}" for s in capped_sections)
+    else:
+        corpus_for_context = transcript
+
     cursor = db.execute(
         'INSERT INTO batches (client_id, transcript_raw, name, style, length, context) VALUES (?, ?, ?, ?, ?, ?)',
         (client_id, transcript, name, style, length, context)
@@ -304,7 +313,7 @@ def generate():
             for i, sec in enumerate(sections):
                 try:
                     post = write_post_for_section(
-                        sec['title'], sec['body'], transcript,
+                        sec['title'], sec['body'], corpus_for_context,
                         style, length, client_rules,
                         style_docs_text, context
                     )
@@ -415,6 +424,7 @@ def rewrite_paragraph(post_id):
         return jsonify({'id': post_id, 'body': new_body, 'paragraph': new_paragraph})
     except Exception as e:
         return jsonify({'error': {'message': str(e)}}), 500
+
 
 # ---------- Serve frontend ----------
 
