@@ -1,10 +1,11 @@
 import os
 import json
+import sqlite3
 from functools import wraps
 from flask import Flask, request, session, jsonify, send_from_directory, Response, stream_with_context
 from dotenv import load_dotenv
 import anthropic as anthropic_sdk
-from db import init_db, get_db, close_db
+from db import init_db, get_db, close_db, DB_PATH
 from prompts import build_system_prompt, build_user_prompt, split_transcript
 
 load_dotenv()
@@ -294,23 +295,30 @@ def generate():
     batch_id = cursor.lastrowid
 
     def stream():
-        yield json.dumps({'type': 'start', 'batchId': batch_id, 'total': len(sections)}) + '\n'
-        for i, sec in enumerate(sections):
-            try:
-                post = write_post_for_section(
-                    sec['title'], sec['body'], transcript,
-                    style, length, client_rules,
-                    style_docs_text, context
-                )
-                post_cursor = db.execute(
-                    'INSERT INTO posts (batch_id, title, body, section_body) VALUES (?, ?, ?, ?)',
-                    (batch_id, sec['title'], post, sec['body'])
-                )
-                db.commit()
-                yield json.dumps({'type': 'post', 'index': i, 'id': post_cursor.lastrowid, 'title': sec['title'], 'body': post, 'error': None}) + '\n'
-            except Exception as e:
-                yield json.dumps({'type': 'post', 'index': i, 'id': None, 'title': sec['title'], 'body': '', 'error': str(e)}) + '\n'
-        yield json.dumps({'type': 'done'}) + '\n'
+        # Open a dedicated connection — g.db is closed when Flask hands off the
+        # streaming response, before this generator finishes.
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        try:
+            yield json.dumps({'type': 'start', 'batchId': batch_id, 'total': len(sections)}) + '\n'
+            for i, sec in enumerate(sections):
+                try:
+                    post = write_post_for_section(
+                        sec['title'], sec['body'], transcript,
+                        style, length, client_rules,
+                        style_docs_text, context
+                    )
+                    post_cursor = conn.execute(
+                        'INSERT INTO posts (batch_id, title, body, section_body) VALUES (?, ?, ?, ?)',
+                        (batch_id, sec['title'], post, sec['body'])
+                    )
+                    conn.commit()
+                    yield json.dumps({'type': 'post', 'index': i, 'id': post_cursor.lastrowid, 'title': sec['title'], 'body': post, 'error': None}) + '\n'
+                except Exception as e:
+                    yield json.dumps({'type': 'post', 'index': i, 'id': None, 'title': sec['title'], 'body': '', 'error': str(e)}) + '\n'
+            yield json.dumps({'type': 'done'}) + '\n'
+        finally:
+            conn.close()
 
     resp = Response(stream_with_context(stream()), mimetype='application/x-ndjson')
     resp.headers['X-Accel-Buffering'] = 'no'
