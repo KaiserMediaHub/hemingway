@@ -47,6 +47,34 @@ LENGTH_INSTRUCTIONS = {
     ),
 }
 
+GLOBAL_STYLE_DOC = '''GLOBAL STYLE STANDARDS — the default voice floor for every client. A
+client's specific rules (below, if any) override anything here they conflict with, but
+absent an override, follow all of this:
+
+1. No throat-clearing openers. Cut any opening sentence that could start literally any
+   post on any topic (e.g. "In today's fast-paced world..."). Start with the actual claim,
+   the number, or the contrarian hook.
+2. No rhetorical-question openers used as a crutch. One sharp, deliberate rhetorical
+   question elsewhere in a post is fine; opening every post with one is the tell.
+3. No hedge-phrases: "it's important to note," "it's worth mentioning," "one could argue,"
+   "generally speaking." State the claim directly instead.
+4. No rule-of-three list cadence in every paragraph. Vary rhythm — sometimes one point,
+   sometimes five, sometimes a single blunt sentence with no list at all.
+5. No formal transition words in casual copy: "moreover," "furthermore," "additionally,"
+   "in conclusion." Use "and," "but," "so," or just start the next sentence.
+6. No em-dash or semicolon overuse. One em dash for a genuine interruption is fine; three
+   per post reads like a template. Semicolons almost never belong in social copy.
+7. No engagement-bait closers ("What do you think? Let me know in the comments!",
+   "Agree or disagree?"). End on the claim itself or a specific next step.
+8. Concrete numbers beat vague intensifiers ("took close rate from 12% to 19%," not
+   "significantly improved results") — but never invent a stat that isn't in the source
+   transcript. Specificity is only good when it's real.
+9. One idea, one thread. If using a metaphor or analogy, pick one image and carry it the
+   whole way through instead of stacking multiple comparisons in the same post.
+10. Contractions and sentence fragments are allowed and encouraged. Real voice breaks
+    grammar rules on purpose — a one-word sentence as a beat, a fragment as a closer. Don't
+    smooth these out into complete, correct sentences.'''
+
 BASE_RULES = '''Rules you never break:
 - Never start a post with the word "I" as the very first word
 - Never use: "game-changer", "dive in", "delve", "foster", "leverage", "in today's world", "it's important to", "revolutionize", "landscape", "unleash", "journey", "passionate", "thrilled to share", or any other AI cliche
@@ -65,6 +93,7 @@ def build_system_prompt(style, client_rules):
         'entrepreneurs, and subject matter experts. Your singular obsession is quality: posts that '
         'feel completely human, never AI-generated, never generic.\n\n'
         f'{STYLE_PROMPTS.get(style, STYLE_PROMPTS["thought-leader"])}\n\n'
+        f'{GLOBAL_STYLE_DOC}\n\n'
     )
     if client_rules and client_rules.strip():
         base += (
