@@ -156,6 +156,48 @@ def build_user_prompt(title, section_body, full_corpus, length, style_docs_text,
     return prompt
 
 
+def build_review_system_prompt(style, client_rules):
+    return (
+        'You are a meticulous style and voice editor for LinkedIn content. You will be shown a '
+        'draft post and the exact standards it was supposed to follow. Your only job is to check '
+        'the draft against those standards and fix any violations.\n\n'
+        f'{STYLE_PROMPTS.get(style, STYLE_PROMPTS["thought-leader"])}\n\n'
+        f'{GLOBAL_STYLE_DOC}\n\n'
+        + (
+            'CLIENT-SPECIFIC RULES — these take priority over everything else. Check the draft '
+            f'against every one of these:\n\n{client_rules.strip()}\n\n'
+            if client_rules and client_rules.strip() else ''
+        )
+        + BASE_RULES
+        + '\n\nIMPORTANT: Do not add, remove, or change any facts, claims, numbers, or substantive '
+        'content from the draft — the underlying point and story must stay exactly the same. Only '
+        'fix violations of the style/voice standards above (banned phrases, cliches, wrong openers, '
+        'wrong closers, formatting issues, tone drift, etc). If the draft already fully complies, '
+        'return it completely unchanged. Output ONLY the final post text, with no preamble, no '
+        'explanation, and no notes about what you changed.'
+    )
+
+
+def build_review_user_prompt(draft, style_docs_text):
+    prompt = ''
+    if style_docs_text and style_docs_text.strip():
+        prompt += (
+            'REFERENCE COPY — past writing samples from this client, for comparing voice/vocabulary:\n\n'
+            '---\n'
+            f'{style_docs_text[:6000]}\n'
+            '---\n\n'
+        )
+    prompt += (
+        'DRAFT POST TO REVIEW:\n\n'
+        '---\n'
+        f'{draft}\n'
+        '---\n\n'
+        'Check this draft against every standard in the system prompt. Rewrite only what violates '
+        'them. Output only the final post text.'
+    )
+    return prompt
+
+
 def split_transcript(text):
     """Parse Degas transcript format: 'VIDEO: 01 - Title.mp4'"""
     sections = []

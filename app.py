@@ -6,7 +6,10 @@ from flask import Flask, request, session, jsonify, send_from_directory, Respons
 from dotenv import load_dotenv
 import anthropic as anthropic_sdk
 from db import init_db, get_db, close_db, DB_PATH
-from prompts import build_system_prompt, build_user_prompt, split_transcript
+from prompts import (
+    build_system_prompt, build_user_prompt, split_transcript,
+    build_review_system_prompt, build_review_user_prompt
+)
 
 load_dotenv()
 
@@ -244,15 +247,37 @@ def call_anthropic(model, max_tokens, system, messages):
     return text_block.text if text_block else ''
 
 
-def write_post_for_section(title, section_body, full_corpus, style, length, client_rules, style_docs_text, batch_context):
-    system = build_system_prompt(style, client_rules)
-    user = build_user_prompt(title, section_body, full_corpus, length, style_docs_text, batch_context, client_rules)
-    return call_anthropic(
+def review_and_revise_post(draft, style, client_rules, style_docs_text):
+    """Second pass: an independent editor call that checks the first pass's
+    output against the same style/voice standards it was supposed to follow,
+    and fixes anything that slipped through. Best-effort — if this call fails
+    for any reason, the caller should fall back to the unreviewed draft rather
+    than losing the post entirely."""
+    system = build_review_system_prompt(style, client_rules)
+    user = build_review_user_prompt(draft, style_docs_text)
+    revised = call_anthropic(
         model='claude-sonnet-4-5',
         max_tokens=1200,
         system=system,
         messages=[{'role': 'user', 'content': user}]
     )
+    return revised.strip() or draft
+
+
+def write_post_for_section(title, section_body, full_corpus, style, length, client_rules, style_docs_text, batch_context):
+    system = build_system_prompt(style, client_rules)
+    user = build_user_prompt(title, section_body, full_corpus, length, style_docs_text, batch_context, client_rules)
+    draft = call_anthropic(
+        model='claude-sonnet-4-5',
+        max_tokens=1200,
+        system=system,
+        messages=[{'role': 'user', 'content': user}]
+    )
+    try:
+        return review_and_revise_post(draft, style, client_rules, style_docs_text)
+    except Exception:
+        # Style QA pass is best-effort -- a working, unreviewed post beats no post.
+        return draft
 
 
 # ---------- Generate (streaming) ----------
