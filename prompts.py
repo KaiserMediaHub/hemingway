@@ -76,11 +76,11 @@ absent an override, follow all of this:
     smooth these out into complete, correct sentences.'''
 
 BASE_RULES = '''Rules you never break:
-- Never start a post with the word "I" as the very first word
+- Never start a post with the word "I" as the very first word (unless the client's own rules or reference examples above explicitly show this as a wanted pattern -- then follow the client's lead)
 - Never use: "game-changer", "dive in", "delve", "foster", "leverage", "in today's world", "it's important to", "revolutionize", "landscape", "unleash", "journey", "passionate", "thrilled to share", or any other AI cliche
 - Never write hollow filler sentences that say nothing
 - Never use bullet points unless the speaker explicitly listed items in the transcript
-- End with either a strong closing line OR a single genuine question, never both
+- End with either a strong closing line OR a single genuine question, never both (unless the client's own rules or reference examples above call for a different closing format, e.g. a comment-to-connect CTA -- then follow the client's lead)
 - Hashtags: 3 maximum, only if genuinely relevant, placed at the very end on their own line
 - Match the speaker's actual vocabulary, rhythm, and personality as heard in the transcript
 - Write from the speaker's perspective in first person
@@ -88,17 +88,33 @@ BASE_RULES = '''Rules you never break:
 
 
 def build_system_prompt(style, client_rules):
+    # A client with a real voice guide on file (style_rules and/or reference
+    # copy) should be governed by that guide alone, not a generic preset
+    # running in parallel. Found in production 2026-08-20: the "punchy" preset
+    # (short, hard-stop sentences) directly fought Harris Projects' own rules
+    # ("loose... sentences that could verge on run-on"), and BASE_RULES' "never
+    # start with I" directly fought an intro pattern Harris's own rules called
+    # for. The preset stays as a sensible default ONLY for clients who haven't
+    # been given real rules yet.
+    has_custom_voice = bool(client_rules and client_rules.strip())
+
     base = (
         'You are an elite ghostwriter specializing in LinkedIn content for business leaders, '
         'entrepreneurs, and subject matter experts. Your singular obsession is quality: posts that '
         'feel completely human, never AI-generated, never generic.\n\n'
-        f'{STYLE_PROMPTS.get(style, STYLE_PROMPTS["thought-leader"])}\n\n'
-        f'{GLOBAL_STYLE_DOC}\n\n'
     )
-    if client_rules and client_rules.strip():
+    if not has_custom_voice:
+        base += f'{STYLE_PROMPTS.get(style, STYLE_PROMPTS["thought-leader"])}\n\n'
+
+    base += f'{GLOBAL_STYLE_DOC}\n\n'
+
+    if has_custom_voice:
         base += (
             'CLIENT-SPECIFIC RULES — read these carefully before writing anything. '
-            'These take priority over everything else. Follow every instruction exactly:\n\n'
+            'These take priority over EVERYTHING else in this prompt, including the base rules '
+            'below. If a base rule below conflicts with a client rule or a client reference '
+            'example, the client rule wins -- do not apply the base rule in that case. Follow '
+            'every client instruction exactly:\n\n'
             f'{client_rules.strip()}\n\n'
         )
     base += BASE_RULES
@@ -157,18 +173,31 @@ def build_user_prompt(title, section_body, full_corpus, length, style_docs_text,
 
 
 def build_review_system_prompt(style, client_rules):
-    return (
+    # Same precedence fix as build_system_prompt above -- the review pass has
+    # to defer to the client's voice guide the same way the draft pass does,
+    # or it will "correct" a draft back into violating the client's own rules.
+    has_custom_voice = bool(client_rules and client_rules.strip())
+
+    parts = (
         'You are a meticulous style and voice editor for LinkedIn content. You will be shown a '
         'draft post and the exact standards it was supposed to follow. Your only job is to check '
         'the draft against those standards and fix any violations.\n\n'
-        f'{STYLE_PROMPTS.get(style, STYLE_PROMPTS["thought-leader"])}\n\n'
-        f'{GLOBAL_STYLE_DOC}\n\n'
-        + (
-            'CLIENT-SPECIFIC RULES — these take priority over everything else. Check the draft '
-            f'against every one of these:\n\n{client_rules.strip()}\n\n'
-            if client_rules and client_rules.strip() else ''
+    )
+    if not has_custom_voice:
+        parts += f'{STYLE_PROMPTS.get(style, STYLE_PROMPTS["thought-leader"])}\n\n'
+
+    parts += f'{GLOBAL_STYLE_DOC}\n\n'
+
+    if has_custom_voice:
+        parts += (
+            'CLIENT-SPECIFIC RULES — these take priority over EVERYTHING else, including the base '
+            'rules below. If a base rule conflicts with a client rule or a client reference '
+            f'example, the client rule wins -- do not enforce the base rule in that case. Check '
+            f'the draft against every one of these:\n\n{client_rules.strip()}\n\n'
         )
-        + BASE_RULES
+
+    parts += (
+        BASE_RULES
         + '\n\nIMPORTANT: Do not add, remove, or change any facts, claims, numbers, or substantive '
         'content from the draft — the underlying point and story must stay exactly the same. Only '
         'fix violations of the style/voice standards above (banned phrases, cliches, wrong openers, '
@@ -176,6 +205,7 @@ def build_review_system_prompt(style, client_rules):
         'return it completely unchanged. Output ONLY the final post text, with no preamble, no '
         'explanation, and no notes about what you changed.'
     )
+    return parts
 
 
 def build_review_user_prompt(draft, style_docs_text):
