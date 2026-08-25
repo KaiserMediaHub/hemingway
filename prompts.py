@@ -47,7 +47,15 @@ LENGTH_INSTRUCTIONS = {
     ),
 }
 
-GLOBAL_STYLE_DOC = '''GLOBAL STYLE STANDARDS — the default voice floor for every client. A
+# These two are DEFAULTS ONLY as of 2026-08-24 -- the live values are stored
+# in the global_style table (db.py) and editable from the "Global Style"
+# button in Hemingway's header. These constants exist to (a) seed that table
+# the first time it's empty, and (b) be the fallback in build_system_prompt/
+# build_review_system_prompt when no override is passed in (keeps every
+# existing caller/test that doesn't know about global_style working
+# unchanged). Ben's ask: "is there a spot where I can edit the global style?
+# Things that every client needs" -- previously this required a code change.
+DEFAULT_GLOBAL_STYLE_DOC = '''GLOBAL STYLE STANDARDS — the default voice floor for every client. A
 client's specific rules (below, if any) override anything here they conflict with, but
 absent an override, follow all of this:
 
@@ -75,7 +83,7 @@ absent an override, follow all of this:
     grammar rules on purpose — a one-word sentence as a beat, a fragment as a closer. Don't
     smooth these out into complete, correct sentences.'''
 
-BASE_RULES = '''Rules you never break:
+DEFAULT_BASE_RULES = '''Rules you never break:
 - Never start a post with the word "I" as the very first word (unless the client's own rules or reference examples above explicitly show this as a wanted pattern -- then follow the client's lead)
 - Never use: "game-changer", "dive in", "delve", "foster", "leverage", "in today's world", "it's important to", "revolutionize", "landscape", "unleash", "journey", "passionate", "thrilled to share", or any other AI cliche
 - Never write hollow filler sentences that say nothing
@@ -87,7 +95,7 @@ BASE_RULES = '''Rules you never break:
 - Every sentence should either advance the idea, deepen it, or land it. Nothing else.'''
 
 
-def build_system_prompt(style, client_rules):
+def build_system_prompt(style, client_rules, global_style_doc=None, base_rules=None):
     # A client with a real voice guide on file (style_rules and/or reference
     # copy) should be governed by that guide alone, not a generic preset
     # running in parallel. Found in production 2026-08-20: the "punchy" preset
@@ -96,6 +104,13 @@ def build_system_prompt(style, client_rules):
     # start with I" directly fought an intro pattern Harris's own rules called
     # for. The preset stays as a sensible default ONLY for clients who haven't
     # been given real rules yet.
+    #
+    # global_style_doc/base_rules are the live, editable values from the
+    # global_style table (app.py fetches these and passes them in). They
+    # default to the hardcoded originals so any caller that doesn't know
+    # about global_style (existing tests, for instance) still works.
+    global_style_doc = global_style_doc if global_style_doc is not None else DEFAULT_GLOBAL_STYLE_DOC
+    base_rules = base_rules if base_rules is not None else DEFAULT_BASE_RULES
     has_custom_voice = bool(client_rules and client_rules.strip())
 
     base = (
@@ -106,7 +121,7 @@ def build_system_prompt(style, client_rules):
     if not has_custom_voice:
         base += f'{STYLE_PROMPTS.get(style, STYLE_PROMPTS["thought-leader"])}\n\n'
 
-    base += f'{GLOBAL_STYLE_DOC}\n\n'
+    base += f'{global_style_doc}\n\n'
 
     if has_custom_voice:
         base += (
@@ -117,7 +132,7 @@ def build_system_prompt(style, client_rules):
             'every client instruction exactly:\n\n'
             f'{client_rules.strip()}\n\n'
         )
-    base += BASE_RULES
+    base += base_rules
     return base
 
 
@@ -172,10 +187,12 @@ def build_user_prompt(title, section_body, full_corpus, length, style_docs_text,
     return prompt
 
 
-def build_review_system_prompt(style, client_rules):
+def build_review_system_prompt(style, client_rules, global_style_doc=None, base_rules=None):
     # Same precedence fix as build_system_prompt above -- the review pass has
     # to defer to the client's voice guide the same way the draft pass does,
     # or it will "correct" a draft back into violating the client's own rules.
+    global_style_doc = global_style_doc if global_style_doc is not None else DEFAULT_GLOBAL_STYLE_DOC
+    base_rules = base_rules if base_rules is not None else DEFAULT_BASE_RULES
     has_custom_voice = bool(client_rules and client_rules.strip())
 
     parts = (
@@ -186,7 +203,7 @@ def build_review_system_prompt(style, client_rules):
     if not has_custom_voice:
         parts += f'{STYLE_PROMPTS.get(style, STYLE_PROMPTS["thought-leader"])}\n\n'
 
-    parts += f'{GLOBAL_STYLE_DOC}\n\n'
+    parts += f'{global_style_doc}\n\n'
 
     if has_custom_voice:
         parts += (
@@ -197,7 +214,7 @@ def build_review_system_prompt(style, client_rules):
         )
 
     parts += (
-        BASE_RULES
+        base_rules
         + '\n\nIMPORTANT: Do not add, remove, or change any facts, claims, numbers, or substantive '
         'content from the draft — the underlying point and story must stay exactly the same. Only '
         'fix violations of the style/voice standards above (banned phrases, cliches, wrong openers, '

@@ -168,7 +168,10 @@
         <div class="tool-sub">Post Writer</div>
       </div>
     </div>
-    <button class="logout-btn" onclick="logout()">Log out</button>
+    <div style="display:flex; align-items:center; gap:10px;">
+      <button class="logout-btn" onclick="openGlobalStyleModal()">Global Style</button>
+      <button class="logout-btn" onclick="logout()">Log out</button>
+    </div>
   </header>
 
   <div class="layout">
@@ -202,8 +205,11 @@
             <textarea id="corpus" rows="10" placeholder="Paste your Degas transcript here..."></textarea>
           </div>
 
-          <div class="eyebrow">Writing style</div>
-          <div class="style-grid">
+          <div class="eyebrow" id="style-eyebrow">Writing style</div>
+          <div class="card" id="style-locked-note" style="display:none; font-size:12px; color:var(--ink-light); padding:14px 16px;">
+            Voice is governed by <strong id="style-locked-client-name"></strong>'s own Style Rules (see the Style &amp; Voice tab) -- these presets are skipped for this client rather than run alongside their rules.
+          </div>
+          <div class="style-grid" id="style-grid">
             <div class="style-card selected" data-style="thought-leader" onclick="selectStyle(this)">
               <div class="style-name">Thought Leader</div>
               <div class="style-desc">Bold, opinionated, authoritative. Built for credibility and reach.</div>
@@ -312,8 +318,37 @@
   </div>
 </div>
 
+<!-- ===== Global style modal ===== -->
+<div class="modal-overlay" id="globalStyleModal">
+  <div class="modal" style="width:640px;">
+    <h3>Global Style</h3>
+    <div class="card-sub" style="margin-bottom:16px;">
+      Applies to every client, every post. A client's own Style Rules (Style &amp; Voice tab) always take priority over this when the two conflict -- this is the floor everyone starts from, not an override of client-specific voice.
+    </div>
+
+    <div class="card-title" style="margin-bottom:6px;">Tone &amp; voice floor</div>
+    <div class="card-sub">The general "sounds human, not AI-generated" standards -- no throat-clearing openers, no hedge phrases, no engagement-bait closers, etc.</div>
+    <textarea id="globalStyleDoc" rows="14" style="margin-bottom:16px;"></textarea>
+
+    <div class="card-title" style="margin-bottom:6px;">Hard rules</div>
+    <div class="card-sub">Banned words/phrases and structural rules (opener/closer format, hashtag limits, etc).</div>
+    <textarea id="globalBaseRules" rows="10"></textarea>
+
+    <div class="error-msg" id="globalStyleError"></div>
+    <div class="modal-actions" style="justify-content:space-between; margin-top:14px;">
+      <button class="btn" onclick="resetGlobalStyleDefaults()" style="font-size:12px;">Reset to default</button>
+      <div style="display:flex; gap:8px;">
+        <span class="status" id="globalStyleStatus" style="align-self:center;"></span>
+        <button class="btn" onclick="closeGlobalStyleModal()">Cancel</button>
+        <button class="btn primary" style="width:auto; padding:10px 16px; font-size:13px;" onclick="saveGlobalStyle()">Save</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
 let currentClientId = null;
+let currentClientName = '';
 let allPosts = [];
 let allTitles = [];
 let selectedStyle = 'thought-leader';
@@ -409,14 +444,28 @@ async function deleteClient(id) {
 
 function selectClient(id, name, styleRules) {
   currentClientId = id;
+  currentClientName = name;
   document.getElementById('noClientState').style.display = 'none';
   document.getElementById('clientPanel').style.display = 'block';
   document.getElementById('styleRules').value = styleRules || '';
   document.getElementById('postsSection').style.display = 'none';
   document.getElementById('errorMsg').textContent = '';
+  updateStylePickerVisibility(name, styleRules);
   loadClients();
   loadDocs();
   loadHistory();
+}
+
+// Preset cards are meaningless once a client has real Style Rules -- the
+// backend skips them entirely in that case (see prompts.build_system_prompt's
+// has_custom_voice check). Showing them anyway as if they still did
+// something was confusing (Ben's ask, 2026-08-24). Hide + explain instead.
+function updateStylePickerVisibility(name, styleRules) {
+  const hasCustomVoice = !!(styleRules && styleRules.trim());
+  document.getElementById('style-eyebrow').style.display = hasCustomVoice ? 'none' : 'block';
+  document.getElementById('style-grid').style.display = hasCustomVoice ? 'none' : 'grid';
+  document.getElementById('style-locked-note').style.display = hasCustomVoice ? 'block' : 'none';
+  document.getElementById('style-locked-client-name').textContent = name || '';
 }
 
 // ---------- Tabs ----------
@@ -427,6 +476,52 @@ function switchTab(tab) {
   if (tab === 'history') loadHistory();
 }
 
+// ---------- Global style ----------
+async function openGlobalStyleModal() {
+  document.getElementById('globalStyleError').textContent = '';
+  document.getElementById('globalStyleStatus').textContent = '';
+  const res = await fetch('/api/global-style');
+  const data = await res.json();
+  document.getElementById('globalStyleDoc').value = data.global_style_doc || '';
+  document.getElementById('globalBaseRules').value = data.base_rules || '';
+  document.getElementById('globalStyleModal').classList.add('visible');
+}
+function closeGlobalStyleModal() {
+  document.getElementById('globalStyleModal').classList.remove('visible');
+}
+async function saveGlobalStyle() {
+  const errorEl = document.getElementById('globalStyleError');
+  const statusEl = document.getElementById('globalStyleStatus');
+  errorEl.textContent = '';
+  const global_style_doc = document.getElementById('globalStyleDoc').value.trim();
+  const base_rules = document.getElementById('globalBaseRules').value.trim();
+  if (!global_style_doc || !base_rules) {
+    errorEl.textContent = 'Both fields are required -- use Reset to default instead of clearing one out.';
+    return;
+  }
+  try {
+    const res = await fetch('/api/global-style', {
+      method: 'PUT', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ global_style_doc, base_rules })
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error?.message || 'Save failed');
+    }
+    statusEl.textContent = 'Saved -- applies to every post from now on';
+    setTimeout(() => { statusEl.textContent = ''; closeGlobalStyleModal(); }, 1400);
+  } catch (e) {
+    errorEl.textContent = e.message;
+  }
+}
+async function resetGlobalStyleDefaults() {
+  if (!confirm('Replace both fields with Hemingway\'s original defaults? This does not save automatically -- you still need to click Save.')) return;
+  const res = await fetch('/api/global-style/reset-defaults');
+  const data = await res.json();
+  document.getElementById('globalStyleDoc').value = data.global_style_doc || '';
+  document.getElementById('globalBaseRules').value = data.base_rules || '';
+}
+
 // ---------- Style rules ----------
 async function saveStyleRules() {
   const rules = document.getElementById('styleRules').value;
@@ -434,6 +529,7 @@ async function saveStyleRules() {
     method: 'PUT', headers: {'Content-Type':'application/json'},
     body: JSON.stringify({ style_rules: rules })
   });
+  updateStylePickerVisibility(currentClientName, rules);
   const status = document.getElementById('styleRulesStatus');
   status.textContent = 'Saved';
   setTimeout(() => status.textContent = '', 2000);

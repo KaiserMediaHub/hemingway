@@ -46,6 +46,19 @@ CREATE TABLE IF NOT EXISTS posts (
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (batch_id) REFERENCES batches(id) ON DELETE CASCADE
 );
+
+-- Single-row table for the rules that apply to EVERY client (Ben's ask,
+-- 2026-08-24: "is there a spot where I can edit the global style? Things
+-- that every client needs"). Previously these were hardcoded in prompts.py
+-- (GLOBAL_STYLE_DOC, BASE_RULES) and required a code change + deploy to
+-- touch. Seeded from those same defaults the first time this table is
+-- empty -- see prompts.DEFAULT_GLOBAL_STYLE_DOC / DEFAULT_BASE_RULES.
+CREATE TABLE IF NOT EXISTS global_style (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    global_style_doc TEXT NOT NULL,
+    base_rules TEXT NOT NULL,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
 '''
 
 
@@ -58,6 +71,19 @@ def init_db():
         conn.commit()
     except Exception:
         pass  # column already exists
+
+    # Seed global_style with the hardcoded defaults, once, if the table is
+    # empty. Import happens here (not at module top) to avoid a circular
+    # import, since prompts.py doesn't import db.py.
+    row = conn.execute('SELECT id FROM global_style WHERE id = 1').fetchone()
+    if not row:
+        from prompts import DEFAULT_GLOBAL_STYLE_DOC, DEFAULT_BASE_RULES
+        conn.execute(
+            'INSERT INTO global_style (id, global_style_doc, base_rules) VALUES (1, ?, ?)',
+            (DEFAULT_GLOBAL_STYLE_DOC, DEFAULT_BASE_RULES)
+        )
+        conn.commit()
+
     conn.close()
 
 

@@ -134,6 +134,55 @@ def delete_client(client_id):
     return jsonify({'ok': True})
 
 
+# ---------- Global Style ----------
+# Rules that apply to every client, regardless of their own style_rules
+# (Ben's ask, 2026-08-24). Single row in global_style, seeded from
+# prompts.DEFAULT_GLOBAL_STYLE_DOC/DEFAULT_BASE_RULES the first time the
+# table is empty -- see db.py's init_db().
+
+def get_global_style():
+    db = get_db()
+    row = db.execute('SELECT global_style_doc, base_rules FROM global_style WHERE id = 1').fetchone()
+    if not row:
+        # Shouldn't happen -- init_db() seeds this row -- but fall back to
+        # the hardcoded defaults rather than crashing if it somehow is missing.
+        from prompts import DEFAULT_GLOBAL_STYLE_DOC, DEFAULT_BASE_RULES
+        return {'global_style_doc': DEFAULT_GLOBAL_STYLE_DOC, 'base_rules': DEFAULT_BASE_RULES}
+    return dict(row)
+
+
+@app.route('/api/global-style', methods=['GET'])
+@require_auth
+def get_global_style_route():
+    return jsonify(get_global_style())
+
+
+@app.route('/api/global-style', methods=['PUT'])
+@require_auth
+def update_global_style():
+    data = request.get_json() or {}
+    global_style_doc = data.get('global_style_doc', '').strip()
+    base_rules = data.get('base_rules', '').strip()
+    if not global_style_doc or not base_rules:
+        return jsonify({'error': {'message': 'Both fields are required -- clear the text and use "Reset to default" instead of saving empty.'}}), 400
+    db = get_db()
+    db.execute(
+        'UPDATE global_style SET global_style_doc = ?, base_rules = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1',
+        (global_style_doc, base_rules)
+    )
+    db.commit()
+    return jsonify(get_global_style())
+
+
+@app.route('/api/global-style/reset-defaults', methods=['GET'])
+@require_auth
+def get_global_style_defaults():
+    """Lets the UI offer a 'reset to default' action without hardcoding the
+    default text twice (once in prompts.py, once in the frontend)."""
+    from prompts import DEFAULT_GLOBAL_STYLE_DOC, DEFAULT_BASE_RULES
+    return jsonify({'global_style_doc': DEFAULT_GLOBAL_STYLE_DOC, 'base_rules': DEFAULT_BASE_RULES})
+
+
 # ---------- Style Docs ----------
 
 @app.route('/api/clients/<int:client_id>/style-docs', methods=['GET'])
@@ -247,13 +296,24 @@ def call_anthropic(model, max_tokens, system, messages):
     return text_block.text if text_block else ''
 
 
-def review_and_revise_post(draft, style, client_rules, style_docs_text):
+def review_and_revise_post(draft, style, client_rules, style_docs_text, global_style=None):
     """Second pass: an independent editor call that checks the first pass's
     output against the same style/voice standards it was supposed to follow,
     and fixes anything that slipped through. Best-effort — if this call fails
     for any reason, the caller should fall back to the unreviewed draft rather
-    than losing the post entirely."""
-    system = build_review_system_prompt(style, client_rules)
+    than losing the post entirely.
+
+    global_style is {'global_style_doc', 'base_rules'} from get_global_style()
+    -- passed in rather than fetched here because this is sometimes called
+    from inside generate()'s stream() generator, which runs after Flask has
+    already handed off the response and closed the request-bound `g.db`
+    connection get_global_style() would otherwise need."""
+    global_style = global_style or {}
+    system = build_review_system_prompt(
+        style, client_rules,
+        global_style_doc=global_style.get('global_style_doc'),
+        base_rules=global_style.get('base_rules'),
+    )
     user = build_review_user_prompt(draft, style_docs_text)
     revised = call_anthropic(
         model='claude-sonnet-4-5',
@@ -264,8 +324,13 @@ def review_and_revise_post(draft, style, client_rules, style_docs_text):
     return revised.strip() or draft
 
 
-def write_post_for_section(title, section_body, full_corpus, style, length, client_rules, style_docs_text, batch_context):
-    system = build_system_prompt(style, client_rules)
+def write_post_for_section(title, section_body, full_corpus, style, length, client_rules, style_docs_text, batch_context, global_style=None):
+    global_style = global_style or {}
+    system = build_system_prompt(
+        style, client_rules,
+        global_style_doc=global_style.get('global_style_doc'),
+        base_rules=global_style.get('base_rules'),
+    )
     user = build_user_prompt(title, section_body, full_corpus, length, style_docs_text, batch_context, client_rules)
     draft = call_anthropic(
         model='claude-sonnet-4-5',
@@ -274,7 +339,7 @@ def write_post_for_section(title, section_body, full_corpus, style, length, clie
         messages=[{'role': 'user', 'content': user}]
     )
     try:
-        return review_and_revise_post(draft, style, client_rules, style_docs_text)
+        return review_and_revise_post(draft, style, client_rules, style_docs_text, global_style)
     except Exception:
         # Style QA pass is best-effort -- a working, unreviewed post beats no post.
         return draft
@@ -320,6 +385,10 @@ def generate():
     docs = db.execute('SELECT content FROM style_docs WHERE client_id = ?', (client_id,)).fetchall()
     style_docs_text = '\n\n---\n\n'.join(r['content'] for r in docs)
     client_rules = client['style_rules'] or ''
+    # Fetched once here, before stream() -- not inside it, since get_global_style()
+    # needs the request-bound g.db/get_db(), which is gone once Flask hands off
+    # the streaming response (see stream()'s own comment on its dedicated connection).
+    global_style = get_global_style()
 
     # Cap the voice-context corpus at 10 sections to control token costs on large batches.
     # The model only needs a sample to learn the speaker's voice — all 40+ sections is wasteful.
@@ -349,7 +418,7 @@ def generate():
                     post = write_post_for_section(
                         sec['title'], sec['body'], corpus_for_context,
                         style, length, client_rules,
-                        style_docs_text, context
+                        style_docs_text, context, global_style
                     )
                     post_cursor = conn.execute(
                         'INSERT INTO posts (batch_id, title, body, section_body) VALUES (?, ?, ?, ?)',
@@ -397,7 +466,7 @@ def rewrite_post(post_id):
         new_body = write_post_for_section(
             post['title'], post['section_body'], batch['transcript_raw'],
             batch['style'], batch['length'], client_rules,
-            style_docs_text, batch['context']
+            style_docs_text, batch['context'], get_global_style()
         )
         db.execute('UPDATE posts SET body = ? WHERE id = ?', (new_body, post_id))
         db.commit()
@@ -431,8 +500,13 @@ def rewrite_paragraph(post_id):
         return jsonify({'error': {'message': 'Invalid paragraph index.'}}), 400
 
     target = paragraphs[paragraph_index]
+    global_style = get_global_style()
     system = (
-        build_system_prompt(batch['style'], client['style_rules']) +
+        build_system_prompt(
+            batch['style'], client['style_rules'],
+            global_style_doc=global_style['global_style_doc'],
+            base_rules=global_style['base_rules'],
+        ) +
         '\n\nYou are revising ONE paragraph of an existing LinkedIn post. Keep it consistent '
         'with the rest of the post in tone and voice. Output ONLY the rewritten paragraph text, nothing else.'
     )
