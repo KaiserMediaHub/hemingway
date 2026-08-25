@@ -191,8 +191,14 @@
         <!-- ===== WRITE TAB ===== -->
         <div class="tab-panel active" id="tab-write">
           <div class="card">
-            <div class="card-title">Full transcript</div>
-            <div class="card-sub">Paste your full Degas transcript here. Hemingway detects each video and writes one LinkedIn post per video — all at once.</div>
+            <div class="card-title">
+              Full transcript
+              <span id="format-toggle" style="float:right; font-weight:400; font-size:12px;">
+                <label style="cursor:pointer; margin-right:12px;"><input type="radio" name="input-format" value="transcript" checked onchange="onFormatChange()"> Degas transcript</label>
+                <label style="cursor:pointer;"><input type="radio" name="input-format" value="plain" onchange="onFormatChange()"> Plain text</label>
+              </span>
+            </div>
+            <div class="card-sub" id="corpus-sub">Paste your full Degas transcript here. Hemingway detects each video and writes one LinkedIn post per video — all at once.</div>
             <textarea id="corpus" rows="10" placeholder="Paste your Degas transcript here..."></textarea>
           </div>
 
@@ -498,13 +504,27 @@ function renderPostBody(index, text, postId) {
   document.getElementById('hint-' + index).style.display = 'block';
 }
 
+function onFormatChange() {
+  const format = document.querySelector('input[name="input-format"]:checked').value;
+  const sub = document.getElementById('corpus-sub');
+  const corpus = document.getElementById('corpus');
+  if (format === 'plain') {
+    sub.textContent = 'Type each post below, starting a new one with "Post 1:", "Post 2:", etc. -- no Degas transcript or timestamps needed.';
+    corpus.placeholder = 'Post 1:\nThis is a post that I want you to write.\n\nPost 2:\nThis is another post I want you to write.';
+  } else {
+    sub.textContent = 'Paste your full Degas transcript here. Hemingway detects each video and writes one LinkedIn post per video — all at once.';
+    corpus.placeholder = 'Paste your Degas transcript here...';
+  }
+}
+
 async function generate() {
   const corpus = document.getElementById('corpus').value.trim();
   const length = document.getElementById('length').value;
+  const inputFormat = document.querySelector('input[name="input-format"]:checked').value;
   const errorMsg = document.getElementById('errorMsg');
   errorMsg.textContent = '';
 
-  if (!corpus) { errorMsg.textContent = 'Please paste your transcript first.'; return; }
+  if (!corpus) { errorMsg.textContent = inputFormat === 'plain' ? 'Please type at least one post first.' : 'Please paste your transcript first.'; return; }
   if (!currentClientId) { errorMsg.textContent = 'Select a client first.'; return; }
 
   document.getElementById('genBtn').disabled = true;
@@ -520,7 +540,7 @@ async function generate() {
   try {
     const res = await fetch('/api/generate', {
       method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ clientId: currentClientId, transcript: corpus, style: selectedStyle, length, context: document.getElementById('context').value.trim(), name: document.getElementById('batchName').value.trim() })
+      body: JSON.stringify({ clientId: currentClientId, transcript: corpus, style: selectedStyle, length, format: inputFormat, context: document.getElementById('context').value.trim(), name: document.getElementById('batchName').value.trim() })
     });
 
     if (!res.ok) {

@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 import anthropic as anthropic_sdk
 from db import init_db, get_db, close_db, DB_PATH
 from prompts import (
-    build_system_prompt, build_user_prompt, split_transcript,
+    build_system_prompt, build_user_prompt, split_transcript, split_transcript_plain,
     build_review_system_prompt, build_review_user_prompt
 )
 
@@ -295,6 +295,10 @@ def generate():
     length = data.get('length')
     context = data.get('context', '')
     name = data.get('name', '').strip()
+    # 'transcript' (default) = Degas format with VIDEO: headers/timestamps.
+    # 'plain' = Ben's ask 2026-08-24: type "Post 1: ..." blocks directly,
+    # no Degas export needed. See split_transcript_plain() in prompts.py.
+    input_format = data.get('format', 'transcript')
 
     if not all([client_id, transcript, style, length]):
         return jsonify({'error': {'message': 'Missing required fields.'}}), 400
@@ -304,9 +308,14 @@ def generate():
     if not client:
         return jsonify({'error': {'message': 'Client not found.'}}), 404
 
-    sections = split_transcript(transcript)
-    if not sections:
-        return jsonify({'error': {'message': 'No video sections detected. Make sure this is a Degas transcript with VIDEO: headers.'}}), 400
+    if input_format == 'plain':
+        sections = split_transcript_plain(transcript)
+        if not sections:
+            return jsonify({'error': {'message': 'No posts detected. Make sure each one starts with "Post 1:", "Post 2:", etc.'}}), 400
+    else:
+        sections = split_transcript(transcript)
+        if not sections:
+            return jsonify({'error': {'message': 'No video sections detected. Make sure this is a Degas transcript with VIDEO: headers.'}}), 400
 
     docs = db.execute('SELECT content FROM style_docs WHERE client_id = ?', (client_id,)).fetchall()
     style_docs_text = '\n\n---\n\n'.join(r['content'] for r in docs)

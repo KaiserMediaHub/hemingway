@@ -258,3 +258,46 @@ def split_transcript(text):
         sections.append({'title': title, 'body': ' '.join(body_lines)})
 
     return sections
+
+
+def split_transcript_plain(text):
+    """Parse plain-text input, no Degas timestamps/VIDEO headers required
+    (Ben's ask, 2026-08-24: "type in posts I want it to write without all
+    the timestamps details"). Format is one block per post, each starting
+    with a 'Post N:' line:
+
+        Post 1:
+        This is a post that I want you to write.
+
+        Post 2:
+        This is another post I want you to write.
+
+    Content on the same line as 'Post N:' is kept too, so 'Post 1: Do the
+    thing' works the same as putting the text on the next line. Each block's
+    title becomes 'Post N' -- there's no separate title concept in this
+    format, unlike split_transcript()'s VIDEO header titles."""
+    sections = []
+    title = None
+    body_lines = []
+
+    for raw_line in text.split('\n'):
+        line = raw_line.strip()
+
+        m = re.match(r'^Post\s+(\d+)\s*:\s*(.*)$', line, re.IGNORECASE)
+        if m:
+            if title and body_lines:
+                sections.append({'title': title, 'body': ' '.join(body_lines)})
+            title = f'Post {m.group(1)}'
+            inline = m.group(2).strip()
+            body_lines = [inline] if inline else []
+            continue
+
+        if not line:
+            continue
+
+        body_lines.append(line)
+
+    if title and body_lines:
+        sections.append({'title': title, 'body': ' '.join(body_lines)})
+
+    return sections
