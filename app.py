@@ -487,7 +487,26 @@ def call_anthropic(model, max_tokens, system, messages):
     return text_block.text if text_block else ''
 
 
-def review_and_revise_post(draft, style, client_rules, style_docs_text, global_style=None):
+def get_active_tone_profile(client_id, context='default'):
+    """Fetch the currently-active Tone Profile for (client, context) and
+    return it as a parsed dict, or None if none is active. Follows the same
+    same-request-caller pattern as get_global_style so both must be fetched
+    BEFORE entering generate()'s stream() closure (which loses g.db).
+    Phase 2 (Ben's ask 2026-08-27) wires this into prompt construction."""
+    db = get_db()
+    row = db.execute(
+        'SELECT profile_json FROM tone_profiles WHERE client_id = ? AND context = ? AND is_active = 1',
+        (client_id, context or 'default')
+    ).fetchone()
+    if not row:
+        return None
+    try:
+        return json.loads(row['profile_json'])
+    except (TypeError, ValueError):
+        return None
+
+
+def review_and_revise_post(draft, style, client_rules, style_docs_text, global_style=None, active_tone_profile=None):
     """Second pass: an independent editor call that checks the first pass's
     output against the same style/voice standards it was supposed to follow,
     and fixes anything that slipped through. Best-effort — if this call fails
@@ -504,6 +523,7 @@ def review_and_revise_post(draft, style, client_rules, style_docs_text, global_s
         style, client_rules,
         global_style_doc=global_style.get('global_style_doc'),
         base_rules=global_style.get('base_rules'),
+        active_tone_profile=active_tone_profile,
     )
     user = build_review_user_prompt(draft, style_docs_text)
     revised = call_anthropic(
@@ -515,14 +535,22 @@ def review_and_revise_post(draft, style, client_rules, style_docs_text, global_s
     return revised.strip() or draft
 
 
-def write_post_for_section(title, section_body, full_corpus, style, length, client_rules, style_docs_text, batch_context, global_style=None):
+def write_post_for_section(title, section_body, full_corpus, style, length, client_rules, style_docs_text, batch_context, global_style=None, active_tone_profile=None):
     global_style = global_style or {}
     system = build_system_prompt(
         style, client_rules,
         global_style_doc=global_style.get('global_style_doc'),
         base_rules=global_style.get('base_rules'),
+        active_tone_profile=active_tone_profile,
     )
-    user = build_user_prompt(title, section_body, full_corpus, length, style_docs_text, batch_context, client_rules)
+    # Phase 2: when a Tone Profile is active it fully replaces the manual
+    # style_rules/reference-copy layer, so DON'T include either of those in
+    # the user prompt -- passing them in as reference material would leak the
+    # exact voice signal we're trying to test the profile against, and would
+    # muddy the Phase 3 delta validation Ben plans against Harris's 9 pairs.
+    user_style_docs = '' if active_tone_profile else style_docs_text
+    user_client_rules = '' if active_tone_profile else client_rules
+    user = build_user_prompt(title, section_body, full_corpus, length, user_style_docs, batch_context, user_client_rules)
     draft = call_anthropic(
         model='claude-sonnet-4-5',
         max_tokens=1200,
@@ -530,7 +558,7 @@ def write_post_for_section(title, section_body, full_corpus, style, length, clie
         messages=[{'role': 'user', 'content': user}]
     )
     try:
-        return review_and_revise_post(draft, style, client_rules, style_docs_text, global_style)
+        return review_and_revise_post(draft, style, client_rules, style_docs_text, global_style, active_tone_profile=active_tone_profile)
     except Exception:
         # Style QA pass is best-effort -- a working, unreviewed post beats no post.
         return draft
@@ -550,6 +578,10 @@ def generate():
     style = data.get('style')
     length = data.get('length')
     context = data.get('context', '')
+    # Ben's ask 2026-08-27: tone_context selects WHICH Tone Profile this batch
+    # uses (default / event / podcast / founder-profile / etc.). Distinct from
+    # `context`, which is free-form batch background text for the model.
+    tone_context = (data.get('tone_context') or 'default').strip() or 'default'
     name = data.get('name', '').strip()
     # 'transcript' (default) = Degas format with VIDEO: headers/timestamps.
     # 'plain' = Ben's ask 2026-08-24: type "Post 1: ..." blocks directly,
@@ -580,6 +612,9 @@ def generate():
     # needs the request-bound g.db/get_db(), which is gone once Flask hands off
     # the streaming response (see stream()'s own comment on its dedicated connection).
     global_style = get_global_style()
+    # Same reason as global_style: must fetch BEFORE stream() -- get_db()/g.db
+    # is gone once Flask hands off the streaming response.
+    active_tone_profile = get_active_tone_profile(client_id, tone_context)
 
     # Cap the voice-context corpus at 10 sections to control token costs on large batches.
     # The model only needs a sample to learn the speaker's voice — all 40+ sections is wasteful.
@@ -609,7 +644,8 @@ def generate():
                     post = write_post_for_section(
                         sec['title'], sec['body'], corpus_for_context,
                         style, length, client_rules,
-                        style_docs_text, context, global_style
+                        style_docs_text, context, global_style,
+                        active_tone_profile=active_tone_profile,
                     )
                     post_cursor = conn.execute(
                         'INSERT INTO posts (batch_id, title, body, section_body) VALUES (?, ?, ?, ?)',
@@ -657,7 +693,8 @@ def rewrite_post(post_id):
         new_body = write_post_for_section(
             post['title'], post['section_body'], batch['transcript_raw'],
             batch['style'], batch['length'], client_rules,
-            style_docs_text, batch['context'], get_global_style()
+            style_docs_text, batch['context'], get_global_style(),
+            active_tone_profile=get_active_tone_profile(client['id']),
         )
         db.execute('UPDATE posts SET body = ? WHERE id = ?', (new_body, post_id))
         db.commit()
@@ -692,11 +729,13 @@ def rewrite_paragraph(post_id):
 
     target = paragraphs[paragraph_index]
     global_style = get_global_style()
+    active_tone_profile = get_active_tone_profile(client['id'])
     system = (
         build_system_prompt(
             batch['style'], client['style_rules'],
             global_style_doc=global_style['global_style_doc'],
             base_rules=global_style['base_rules'],
+            active_tone_profile=active_tone_profile,
         ) +
         '\n\nYou are revising ONE paragraph of an existing LinkedIn post. Keep it consistent '
         'with the rest of the post in tone and voice. Output ONLY the rewritten paragraph text, nothing else.'

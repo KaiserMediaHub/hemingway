@@ -95,7 +95,76 @@ DEFAULT_BASE_RULES = '''Rules you never break:
 - Every sentence should either advance the idea, deepen it, or land it. Nothing else.'''
 
 
-def build_system_prompt(style, client_rules, global_style_doc=None, base_rules=None):
+def render_tone_profile_for_prompt(profile_dict):
+    """Turn a stored Tone Profile JSON dict into a prompt-ready instruction
+    block. Called by build_system_prompt/build_review_system_prompt when a
+    client has an active profile (Phase 2, Ben's ask 2026-08-27).
+
+    Filtering rules -- kept explicit so it's easy to see why a rendered
+    profile is short:
+      * summary and voice_do/voice_dont are always included when present.
+      * category rows only render if score >= 40 (below that, telling the
+        model about a trait that's basically absent is noise).
+      * category rows with confidence < 40 render as soft "tendency"
+        language ("this speaker tends to...") rather than assertions.
+      * category rows with confidence >= 70 render as hard voice rules.
+    """
+    if not profile_dict or not isinstance(profile_dict, dict):
+        return ''
+
+    parts = ['ACTIVE TONE PROFILE — this replaces any generic style preset for this client. Follow it exactly.\n']
+
+    summary = (profile_dict.get('summary') or '').strip()
+    if summary:
+        parts.append(f'Voice summary: {summary}')
+
+    voice_do = profile_dict.get('voice_do') or []
+    if voice_do:
+        parts.append('\nTHIS VOICE DOES (do all of these):')
+        for item in voice_do:
+            parts.append(f'  - {item}')
+
+    voice_dont = profile_dict.get('voice_dont') or []
+    if voice_dont:
+        parts.append('\nTHIS VOICE AVOIDS (never do any of these):')
+        for item in voice_dont:
+            parts.append(f'  - {item}')
+
+    strong_lines = []
+    tendency_lines = []
+    for cat in TONE_PROFILE_CATEGORIES:
+        c = profile_dict.get(cat)
+        if not isinstance(c, dict):
+            continue
+        try:
+            score = int(c.get('score', 0))
+            confidence = int(c.get('confidence', 0))
+        except (TypeError, ValueError):
+            continue
+        if score < 40:
+            continue
+        note = (c.get('note') or '').strip()
+        if not note:
+            continue
+        cat_label = cat.replace('_', ' ')
+        if confidence >= 70:
+            strong_lines.append(f'  - {cat_label} ({score}/100): {note}')
+        elif confidence >= 40:
+            tendency_lines.append(f'  - {cat_label} ({score}/100, moderate confidence): {note}')
+        else:
+            tendency_lines.append(f'  - {cat_label} ({score}/100, low confidence -- tendency only): {note}')
+
+    if strong_lines:
+        parts.append('\nHIGH-CONFIDENCE VOICE TRAITS (treat as rules):')
+        parts.extend(strong_lines)
+    if tendency_lines:
+        parts.append('\nOBSERVED TENDENCIES (weight, but do not force):')
+        parts.extend(tendency_lines)
+
+    return '\n'.join(parts) + '\n\n'
+
+
+def build_system_prompt(style, client_rules, global_style_doc=None, base_rules=None, active_tone_profile=None):
     # A client with a real voice guide on file (style_rules and/or reference
     # copy) should be governed by that guide alone, not a generic preset
     # running in parallel. Found in production 2026-08-20: the "punchy" preset
@@ -111,6 +180,19 @@ def build_system_prompt(style, client_rules, global_style_doc=None, base_rules=N
     # about global_style (existing tests, for instance) still works.
     global_style_doc = global_style_doc if global_style_doc is not None else DEFAULT_GLOBAL_STYLE_DOC
     base_rules = base_rules if base_rules is not None else DEFAULT_BASE_RULES
+
+    # Phase 2 precedence (Ben's ask 2026-08-27): when an active Tone Profile
+    # exists, it FULLY REPLACES the manual style_rules/reference-copy layer,
+    # so a bad profile can't be silently rescued by an old rule that
+    # accidentally still applies -- makes the profile's real signal
+    # unambiguous when we validate against Harris Projects's 9 client-edit
+    # pairs in Phase 3. Global style + base rules stay unconditionally
+    # (those are house standards, not client voice). The old style_rules
+    # code path is preserved verbatim for clients with no active profile.
+    profile_block = ''
+    if active_tone_profile:
+        profile_block = render_tone_profile_for_prompt(active_tone_profile)
+    has_active_profile = bool(profile_block)
     has_custom_voice = bool(client_rules and client_rules.strip())
 
     base = (
@@ -118,12 +200,22 @@ def build_system_prompt(style, client_rules, global_style_doc=None, base_rules=N
         'entrepreneurs, and subject matter experts. Your singular obsession is quality: posts that '
         'feel completely human, never AI-generated, never generic.\n\n'
     )
-    if not has_custom_voice:
+    # Skip the generic preset when EITHER the profile or manual style_rules
+    # is in play -- both are client-specific voice guidance that shouldn't
+    # be diluted by a generic preset running in parallel.
+    if not has_active_profile and not has_custom_voice:
         base += f'{STYLE_PROMPTS.get(style, STYLE_PROMPTS["thought-leader"])}\n\n'
 
     base += f'{global_style_doc}\n\n'
 
-    if has_custom_voice:
+    if has_active_profile:
+        base += profile_block
+        base += (
+            'The Tone Profile above takes priority over the base rules below. If a base rule '
+            'below conflicts with the Tone Profile, the profile wins -- do not enforce the base '
+            'rule in that case.\n\n'
+        )
+    elif has_custom_voice:
         base += (
             'CLIENT-SPECIFIC RULES — read these carefully before writing anything. '
             'These take priority over EVERYTHING else in this prompt, including the base rules '
@@ -187,12 +279,21 @@ def build_user_prompt(title, section_body, full_corpus, length, style_docs_text,
     return prompt
 
 
-def build_review_system_prompt(style, client_rules, global_style_doc=None, base_rules=None):
+def build_review_system_prompt(style, client_rules, global_style_doc=None, base_rules=None, active_tone_profile=None):
     # Same precedence fix as build_system_prompt above -- the review pass has
     # to defer to the client's voice guide the same way the draft pass does,
     # or it will "correct" a draft back into violating the client's own rules.
+    # Phase 2 adds the same Tone Profile precedence as the draft prompt --
+    # when a profile is active it replaces the manual style_rules layer here
+    # too, or the reviewer will "correct" a profile-conformant draft into
+    # violating the profile.
     global_style_doc = global_style_doc if global_style_doc is not None else DEFAULT_GLOBAL_STYLE_DOC
     base_rules = base_rules if base_rules is not None else DEFAULT_BASE_RULES
+
+    profile_block = ''
+    if active_tone_profile:
+        profile_block = render_tone_profile_for_prompt(active_tone_profile)
+    has_active_profile = bool(profile_block)
     has_custom_voice = bool(client_rules and client_rules.strip())
 
     parts = (
@@ -200,12 +301,20 @@ def build_review_system_prompt(style, client_rules, global_style_doc=None, base_
         'draft post and the exact standards it was supposed to follow. Your only job is to check '
         'the draft against those standards and fix any violations.\n\n'
     )
-    if not has_custom_voice:
+    if not has_active_profile and not has_custom_voice:
         parts += f'{STYLE_PROMPTS.get(style, STYLE_PROMPTS["thought-leader"])}\n\n'
 
     parts += f'{global_style_doc}\n\n'
 
-    if has_custom_voice:
+    if has_active_profile:
+        parts += profile_block
+        parts += (
+            'The Tone Profile above takes priority over the base rules below. If a base rule '
+            'conflicts with the Tone Profile, the profile wins -- do not "fix" a draft that '
+            'complies with the profile just because it violates a base rule. Check the draft '
+            'against every element of the profile and every base rule that does not conflict.\n\n'
+        )
+    elif has_custom_voice:
         parts += (
             'CLIENT-SPECIFIC RULES — these take priority over EVERYTHING else, including the base '
             'rules below. If a base rule conflicts with a client rule or a client reference '

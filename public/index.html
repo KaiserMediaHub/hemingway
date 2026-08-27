@@ -274,7 +274,17 @@
             <textarea id="context" rows="3" placeholder="e.g. John is the CEO of a logistics company. These videos are from a keynote he gave at a supply chain conference in March. The posts will run during Q2 to support their new product launch."></textarea>
           </div>
 
-          <button class="btn primary" id="genBtn" onclick="generate()">Write All Posts</button>
+          <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+            <button class="btn primary" id="genBtn" onclick="generate()">Write All Posts</button>
+            <span style="font-size:12px;color:var(--ink-light);">For:</span>
+            <select id="writeToneContext" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-size:12px;font-family:inherit;background:var(--white);">
+              <option value="default">default</option>
+              <option value="event">event</option>
+              <option value="podcast">podcast</option>
+              <option value="founder-profile">founder-profile</option>
+            </select>
+            <span id="writeToneStatus" style="font-size:11px;color:var(--ink-light);"></span>
+          </div>
           <div class="status" id="status"></div>
           <div class="progress-bar-wrap" id="progressWrap"><div class="progress-bar" id="progressBar"></div></div>
           <div class="error-msg" id="errorMsg"></div>
@@ -515,7 +525,37 @@ function selectClient(id, name, styleRules) {
   loadDocs();
   loadHistory();
   loadToneProfiles();
+  refreshWriteToneStatus();
 }
+
+async function refreshWriteToneStatus() {
+  // Phase 2: after Write Posts fires, the backend picks whichever Tone
+  // Profile is active for (currentClient, selected tone_context). Show Ben
+  // upfront whether that context actually has an active profile -- avoids
+  // guessing when a post comes out sounding generic ("did the profile
+  // apply? was one even set?"). No profile == falls back to old
+  // style_rules/reference-copy path (Phase 1 behavior).
+  const statusEl = document.getElementById('writeToneStatus');
+  if (!statusEl || !currentClientId) return;
+  const ctx = document.getElementById('writeToneContext').value;
+  try {
+    const res = await fetch('/api/clients/' + currentClientId + '/tone-profiles/active?context=' + encodeURIComponent(ctx));
+    const data = await res.json();
+    if (data && data.version) {
+      statusEl.textContent = 'v' + data.version + ' active';
+      statusEl.style.color = 'var(--navy)';
+    } else {
+      statusEl.textContent = 'no profile — using Style Rules';
+      statusEl.style.color = 'var(--ink-light)';
+    }
+  } catch (e) {
+    statusEl.textContent = '';
+  }
+}
+document.addEventListener('DOMContentLoaded', () => {
+  const el = document.getElementById('writeToneContext');
+  if (el) el.addEventListener('change', refreshWriteToneStatus);
+});
 
 // Preset cards are meaningless once a client has real Style Rules -- the
 // backend skips them entirely in that case (see prompts.build_system_prompt's
@@ -756,6 +796,7 @@ async function viewToneProfile(profileId) {
 async function activateToneProfile(profileId) {
   await fetch('/api/clients/' + currentClientId + '/tone-profiles/' + profileId + '/activate', { method: 'POST' });
   loadToneProfiles();
+  refreshWriteToneStatus();
 }
 
 async function rejectToneProfile(profileId) {
@@ -865,7 +906,7 @@ async function generate() {
   try {
     const res = await fetch('/api/generate', {
       method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ clientId: currentClientId, transcript: corpus, style: selectedStyle, length, format: inputFormat, context: document.getElementById('context').value.trim(), name: document.getElementById('batchName').value.trim() })
+      body: JSON.stringify({ clientId: currentClientId, transcript: corpus, style: selectedStyle, length, format: inputFormat, context: document.getElementById('context').value.trim(), name: document.getElementById('batchName').value.trim(), tone_context: document.getElementById('writeToneContext').value })
     });
 
     if (!res.ok) {
