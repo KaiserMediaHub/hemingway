@@ -8,7 +8,9 @@ import anthropic as anthropic_sdk
 from db import init_db, get_db, close_db, DB_PATH
 from prompts import (
     build_system_prompt, build_user_prompt, split_transcript, split_transcript_plain,
-    build_review_system_prompt, build_review_user_prompt
+    build_review_system_prompt, build_review_user_prompt,
+    build_tone_profile_prompt, build_tone_profile_change_summary_prompt,
+    TONE_PROFILE_CATEGORIES,
 )
 
 load_dotenv()
@@ -181,6 +183,195 @@ def get_global_style_defaults():
     default text twice (once in prompts.py, once in the frontend)."""
     from prompts import DEFAULT_GLOBAL_STYLE_DOC, DEFAULT_BASE_RULES
     return jsonify({'global_style_doc': DEFAULT_GLOBAL_STYLE_DOC, 'base_rules': DEFAULT_BASE_RULES})
+
+
+# ---------- Tone Profile (Phase 1: generate + version + activate, INERT) ----------
+# Ben's ask 2026-08-27: a versioned Tone Profile per client per context that
+# evolves over time. Phase 1 stores profiles; Phase 2 wires them into
+# generation; Phase 3 adds the Delta Analyzer. See prompts.py for the
+# category list and prompt construction.
+
+def _count_written_chars(source_type, source_text):
+    """Track a rough spoken/written source mix so future versions can weight
+    trust accordingly. Cheap heuristic -- just categorize by source_type."""
+    n = len(source_text or '')
+    if source_type == 'transcript':
+        return {'spoken_chars': n, 'written_chars': 0}
+    return {'spoken_chars': 0, 'written_chars': n}
+
+
+def _merge_source_mix(parent_mix_json, added_mix):
+    parent = json.loads(parent_mix_json) if parent_mix_json else {}
+    return {
+        'spoken_chars': parent.get('spoken_chars', 0) + added_mix.get('spoken_chars', 0),
+        'written_chars': parent.get('written_chars', 0) + added_mix.get('written_chars', 0),
+    }
+
+
+@app.route('/api/clients/<int:client_id>/tone-profiles', methods=['GET'])
+@require_auth
+def list_tone_profiles(client_id):
+    """List every version for this client, optionally filtered by context.
+    Ordered newest-first so the UI can show current + history at a glance."""
+    context = request.args.get('context')
+    db = get_db()
+    if context:
+        rows = db.execute(
+            'SELECT id, client_id, context, version, source_type, profile_json, change_summary, '
+            'parent_version, status, is_active, source_mix, created_at '
+            'FROM tone_profiles WHERE client_id = ? AND context = ? ORDER BY version DESC',
+            (client_id, context)
+        ).fetchall()
+    else:
+        rows = db.execute(
+            'SELECT id, client_id, context, version, source_type, profile_json, change_summary, '
+            'parent_version, status, is_active, source_mix, created_at '
+            'FROM tone_profiles WHERE client_id = ? ORDER BY context, version DESC',
+            (client_id,)
+        ).fetchall()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route('/api/clients/<int:client_id>/tone-profiles/active', methods=['GET'])
+@require_auth
+def get_active_tone_profile(client_id):
+    """Return the currently active profile for a given context (defaults to
+    'default'), or null if none exists yet."""
+    context = request.args.get('context', 'default')
+    db = get_db()
+    row = db.execute(
+        'SELECT * FROM tone_profiles WHERE client_id = ? AND context = ? AND is_active = 1',
+        (client_id, context)
+    ).fetchone()
+    return jsonify(dict(row) if row else None)
+
+
+@app.route('/api/clients/<int:client_id>/tone-profiles', methods=['POST'])
+@require_auth
+def create_tone_profile(client_id):
+    """Generate a new Tone Profile version from pasted source material.
+    Status defaults to 'pending' -- Ben must explicitly activate before it
+    affects anything (though Phase 1 doesn't wire it into generation yet)."""
+    data = request.get_json() or {}
+    source_type = (data.get('source_type') or '').strip().lower()
+    source_text = (data.get('source_text') or '').strip()
+    context = (data.get('context') or 'default').strip() or 'default'
+
+    if source_type not in ('transcript', 'posts'):
+        return jsonify({'error': {'message': "source_type must be 'transcript' or 'posts'."}}), 400
+    if len(source_text) < 200:
+        return jsonify({'error': {'message': 'Source text is too short to derive a meaningful profile (min 200 chars).'}}), 400
+
+    db = get_db()
+    if not db.execute('SELECT id FROM clients WHERE id = ?', (client_id,)).fetchone():
+        return jsonify({'error': {'message': 'Client not found.'}}), 404
+
+    # Find the current highest version for this (client, context) so we can
+    # increment. First-ever profile for this context starts at v1.
+    latest = db.execute(
+        'SELECT version, source_mix, profile_json FROM tone_profiles '
+        'WHERE client_id = ? AND context = ? ORDER BY version DESC LIMIT 1',
+        (client_id, context)
+    ).fetchone()
+    next_version = (latest['version'] + 1) if latest else 1
+    parent_version = latest['version'] if latest else None
+
+    # Generate the profile JSON via Claude.
+    system, user = build_tone_profile_prompt(source_type, source_text, context=context)
+    try:
+        raw = call_anthropic(
+            model='claude-sonnet-4-5',
+            max_tokens=4000,
+            system=system,
+            messages=[{'role': 'user', 'content': user}]
+        )
+    except Exception as e:
+        return jsonify({'error': {'message': f'Profile generation failed: {e}'}}), 502
+
+    # Defensive JSON extraction -- the prompt asks for pure JSON but strip any
+    # accidental fences just in case the model wraps it.
+    cleaned = raw.strip()
+    if cleaned.startswith('```'):
+        cleaned = cleaned.strip('`')
+        if cleaned.lower().startswith('json'):
+            cleaned = cleaned[4:].strip()
+    try:
+        profile_obj = json.loads(cleaned)
+    except json.JSONDecodeError as e:
+        return jsonify({'error': {'message': f'Model returned invalid JSON: {e}. Raw start: {cleaned[:200]}'}}), 502
+
+    profile_json_str = json.dumps(profile_obj, ensure_ascii=False)
+
+    # Change summary vs parent (skipped for v1 -- no parent).
+    change_summary = ''
+    if latest:
+        try:
+            sys2, usr2 = build_tone_profile_change_summary_prompt(latest['profile_json'], profile_json_str)
+            change_summary = call_anthropic(
+                model='claude-sonnet-4-5', max_tokens=400, system=sys2,
+                messages=[{'role': 'user', 'content': usr2}]
+            ).strip()
+        except Exception:
+            change_summary = '(change summary unavailable)'
+
+    added_mix = _count_written_chars(source_type, source_text)
+    source_mix = _merge_source_mix(latest['source_mix'] if latest else None, added_mix)
+
+    cur = db.execute(
+        'INSERT INTO tone_profiles (client_id, context, version, source_type, source_text, '
+        'profile_json, rejection_list, source_mix, change_summary, parent_version, status, is_active) '
+        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        (client_id, context, next_version, source_type, source_text, profile_json_str,
+         '[]', json.dumps(source_mix), change_summary, parent_version, 'pending', 0)
+    )
+    db.commit()
+    new_id = cur.lastrowid
+    row = db.execute('SELECT * FROM tone_profiles WHERE id = ?', (new_id,)).fetchone()
+    return jsonify(dict(row))
+
+
+@app.route('/api/clients/<int:client_id>/tone-profiles/<int:profile_id>/activate', methods=['POST'])
+@require_auth
+def activate_tone_profile(client_id, profile_id):
+    """Mark a profile as approved + active. Only ONE profile per
+    (client, context) may be active at a time -- old actives get flipped
+    off, not deleted (revert is a matter of activating an older version)."""
+    db = get_db()
+    row = db.execute(
+        'SELECT * FROM tone_profiles WHERE id = ? AND client_id = ?',
+        (profile_id, client_id)
+    ).fetchone()
+    if not row:
+        return jsonify({'error': {'message': 'Profile not found for this client.'}}), 404
+    db.execute(
+        'UPDATE tone_profiles SET is_active = 0 WHERE client_id = ? AND context = ? AND id != ?',
+        (client_id, row['context'], profile_id)
+    )
+    db.execute(
+        "UPDATE tone_profiles SET is_active = 1, status = 'approved' WHERE id = ?",
+        (profile_id,)
+    )
+    db.commit()
+    updated = db.execute('SELECT * FROM tone_profiles WHERE id = ?', (profile_id,)).fetchone()
+    return jsonify(dict(updated))
+
+
+@app.route('/api/clients/<int:client_id>/tone-profiles/<int:profile_id>/reject', methods=['POST'])
+@require_auth
+def reject_tone_profile(client_id, profile_id):
+    """Mark a pending profile as rejected. Kept in history but never active."""
+    db = get_db()
+    row = db.execute(
+        'SELECT id, is_active FROM tone_profiles WHERE id = ? AND client_id = ?',
+        (profile_id, client_id)
+    ).fetchone()
+    if not row:
+        return jsonify({'error': {'message': 'Profile not found for this client.'}}), 404
+    if row['is_active']:
+        return jsonify({'error': {'message': 'This profile is currently active; activate a different version before rejecting.'}}), 400
+    db.execute("UPDATE tone_profiles SET status = 'rejected' WHERE id = ?", (profile_id,))
+    db.commit()
+    return jsonify({'ok': True})
 
 
 # ---------- Style Docs ----------

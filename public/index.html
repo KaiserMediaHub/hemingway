@@ -124,6 +124,30 @@
   .upload-zone { border: 1.5px dashed var(--border); border-radius: 8px; padding: 24px; text-align: center; cursor: pointer; color: var(--ink-light); font-size: 13px; }
   .upload-zone:hover { border-color: var(--border-hover); color: var(--ink-mid); }
 
+  /* ---- Tone Profile (Phase 1, Ben's ask 2026-08-27) ---- */
+  .tp-header { display: flex; gap: 10px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
+  .tp-header select { padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; font-family: inherit; background: var(--white); }
+  .tp-context-add { font-size: 12px; color: var(--ink-light); cursor: pointer; text-decoration: underline; }
+  .tp-source-type { display: flex; gap: 6px; margin-bottom: 8px; }
+  .tp-source-type label { font-size: 12px; display: flex; gap: 4px; align-items: center; cursor: pointer; padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px; }
+  .tp-source-type input:checked + span { font-weight: 600; }
+  .tp-active-banner { background: var(--cream); padding: 10px 14px; border-radius: 6px; margin-bottom: 12px; font-size: 12px; color: var(--ink-mid); border-left: 3px solid var(--navy); }
+  .tp-active-banner b { color: var(--navy); }
+  .tp-version-row { padding: 10px 12px; background: var(--white); border: 1px solid var(--border); border-radius: 6px; margin-bottom: 6px; display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 12px; }
+  .tp-version-row.active { border-color: var(--navy); background: var(--cream); }
+  .tp-version-meta { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .tp-version-pill { padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+  .tp-version-pill.pending { background: #fef3c7; color: #92400e; }
+  .tp-version-pill.approved { background: #d1fae5; color: #065f46; }
+  .tp-version-pill.rejected { background: #fee2e2; color: #991b1b; }
+  .tp-actions button { margin-left: 4px; font-size: 11px; padding: 4px 10px; }
+  .tp-profile-view { background: var(--cream); border-radius: 6px; padding: 14px; margin-top: 10px; font-size: 12px; max-height: 400px; overflow: auto; }
+  .tp-cat-row { display: grid; grid-template-columns: 150px 60px 60px 1fr; gap: 8px; padding: 4px 0; align-items: baseline; }
+  .tp-cat-name { text-transform: capitalize; font-weight: 500; color: var(--ink-mid); }
+  .tp-cat-score { text-align: right; font-variant-numeric: tabular-nums; }
+  .tp-cat-quote { font-style: italic; color: var(--ink-light); font-size: 11px; }
+  .tp-list { margin: 6px 0 0 0; padding-left: 18px; }
+
   /* ---- History ---- */
   .history-item { padding: 14px 16px; background: var(--white); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 10px; cursor: pointer; display: flex; justify-content: space-between; align-items: center; }
   .history-item:hover { border-color: var(--border-hover); }
@@ -266,6 +290,42 @@
 
         <!-- ===== STYLE TAB ===== -->
         <div class="tab-panel" id="tab-style">
+          <!-- ===== Tone Profile (Phase 1) ===== -->
+          <div class="card">
+            <div class="card-title">Tone Profile <span style="font-size:11px;color:var(--ink-light);font-weight:400;">(Phase 1 preview — not yet wired into generation)</span></div>
+            <div class="card-sub">Paste a long-form transcript (spoken) or 10-15 past posts (written). Get back a structured profile of this client's voice. Every version is saved; activate one to make it the current profile for this context.</div>
+
+            <div class="tp-header">
+              <label style="font-size:12px;color:var(--ink-mid);">Context:</label>
+              <select id="tpContext" onchange="loadToneProfiles()">
+                <option value="default">default</option>
+                <option value="event">event</option>
+                <option value="podcast">podcast</option>
+                <option value="founder-profile">founder-profile</option>
+              </select>
+              <span class="tp-context-add" onclick="addCustomContext()">+ custom context</span>
+            </div>
+
+            <div id="tpActiveBanner" style="display:none;" class="tp-active-banner"></div>
+
+            <div class="tp-source-type">
+              <label><input type="radio" name="tpSourceType" value="transcript" checked> <span>Transcript (spoken)</span></label>
+              <label><input type="radio" name="tpSourceType" value="posts"> <span>Past posts (written)</span></label>
+            </div>
+            <textarea id="tpSourceText" rows="10" placeholder="Paste the raw transcript or 10-15 previous posts here. Min 200 chars."></textarea>
+            <div style="display:flex;gap:8px;margin-top:8px;align-items:center;">
+              <button class="btn primary" onclick="generateToneProfile()" id="tpGenerateBtn">Generate new version</button>
+              <span class="status" id="tpStatus"></span>
+            </div>
+
+            <div style="margin-top:20px;">
+              <div style="font-size:12px;font-weight:600;color:var(--ink-mid);margin-bottom:8px;">Versions</div>
+              <div id="tpVersionList"><div style="font-size:12px;color:var(--ink-light);">Loading...</div></div>
+            </div>
+
+            <div id="tpProfileView" style="display:none;"></div>
+          </div>
+
           <div class="card">
             <div class="card-title">Style rules</div>
             <div class="card-sub">Plain-language do's and don'ts for this client, one per line. Example: "Don't use the phrase 'last forty years'." These are injected into every post written for this client.</div>
@@ -454,6 +514,7 @@ function selectClient(id, name, styleRules) {
   loadClients();
   loadDocs();
   loadHistory();
+  loadToneProfiles();
 }
 
 // Preset cards are meaningless once a client has real Style Rules -- the
@@ -533,6 +594,174 @@ async function saveStyleRules() {
   const status = document.getElementById('styleRulesStatus');
   status.textContent = 'Saved';
   setTimeout(() => status.textContent = '', 2000);
+}
+
+// ---------- Tone Profile (Phase 1) ----------
+// Everything below is inert w.r.t. actual post generation -- that gets wired
+// in during Phase 2. Right now this is a paste-generate-review workflow so
+// Ben can validate the profile output against real client data before it
+// starts driving anything.
+function addCustomContext() {
+  const name = (prompt('Context name (e.g. "webinar", "sales-page")') || '').trim().toLowerCase().replace(/\s+/g, '-');
+  if (!name) return;
+  const sel = document.getElementById('tpContext');
+  if (![...sel.options].some(o => o.value === name)) {
+    const opt = document.createElement('option');
+    opt.value = name; opt.textContent = name;
+    sel.appendChild(opt);
+  }
+  sel.value = name;
+  loadToneProfiles();
+}
+
+async function loadToneProfiles() {
+  if (!currentClientId) return;
+  const ctx = document.getElementById('tpContext').value;
+  document.getElementById('tpProfileView').style.display = 'none';
+  document.getElementById('tpVersionList').innerHTML = '<div style="font-size:12px;color:var(--ink-light);">Loading...</div>';
+
+  const [profilesRes, activeRes] = await Promise.all([
+    fetch('/api/clients/' + currentClientId + '/tone-profiles?context=' + encodeURIComponent(ctx)),
+    fetch('/api/clients/' + currentClientId + '/tone-profiles/active?context=' + encodeURIComponent(ctx)),
+  ]);
+  const profiles = await profilesRes.json();
+  const active = await activeRes.json();
+
+  // Active-banner
+  const banner = document.getElementById('tpActiveBanner');
+  if (active) {
+    const mix = active.source_mix ? JSON.parse(active.source_mix) : {};
+    const spoken = mix.spoken_chars || 0, written = mix.written_chars || 0;
+    banner.style.display = 'block';
+    banner.innerHTML = '<b>Active:</b> v' + active.version + ' (' + escapeHtml(active.source_type) + ')'
+      + ' &middot; source mix: ' + spoken.toLocaleString() + ' spoken chars / ' + written.toLocaleString() + ' written chars';
+  } else {
+    banner.style.display = 'none';
+  }
+
+  // Version list
+  const list = document.getElementById('tpVersionList');
+  if (!profiles.length) {
+    list.innerHTML = '<div style="font-size:12px;color:var(--ink-light);">No versions yet. Paste source material above and generate v1.</div>';
+    return;
+  }
+  list.innerHTML = '';
+  profiles.forEach(p => {
+    const row = document.createElement('div');
+    row.className = 'tp-version-row' + (p.is_active ? ' active' : '');
+    const pillClass = p.is_active ? 'approved' : p.status;
+    const summary = p.change_summary ? escapeHtml(p.change_summary) : '(initial version)';
+    row.innerHTML =
+      '<div class="tp-version-meta">'
+        + '<b>v' + p.version + '</b>'
+        + '<span class="tp-version-pill ' + pillClass + '">' + (p.is_active ? 'ACTIVE' : p.status) + '</span>'
+        + '<span style="color:var(--ink-light);">' + escapeHtml(p.source_type) + '</span>'
+        + '<span style="color:var(--ink-light);">' + new Date(p.created_at + 'Z').toLocaleString() + '</span>'
+      + '</div>'
+      + '<div class="tp-actions">'
+        + '<button class="btn" onclick="viewToneProfile(' + p.id + ')">View</button>'
+        + (p.is_active ? '' : '<button class="btn" onclick="activateToneProfile(' + p.id + ')">Activate</button>')
+        + (p.is_active || p.status === 'rejected' ? '' : '<button class="btn" onclick="rejectToneProfile(' + p.id + ')">Reject</button>')
+      + '</div>';
+    if (p.change_summary && !p.is_active) {
+      const s = document.createElement('div');
+      s.style.cssText = 'font-size:11px;color:var(--ink-light);margin-top:4px;width:100%;';
+      s.textContent = summary;
+      row.appendChild(s);
+    }
+    list.appendChild(row);
+  });
+}
+
+async function generateToneProfile() {
+  if (!currentClientId) return;
+  const source_type = document.querySelector('input[name="tpSourceType"]:checked').value;
+  const source_text = document.getElementById('tpSourceText').value.trim();
+  const context = document.getElementById('tpContext').value;
+  const status = document.getElementById('tpStatus');
+  const btn = document.getElementById('tpGenerateBtn');
+
+  if (source_text.length < 200) { status.textContent = 'Need at least 200 chars.'; return; }
+
+  btn.disabled = true; btn.textContent = 'Analyzing...'; status.textContent = '';
+  try {
+    const res = await fetch('/api/clients/' + currentClientId + '/tone-profiles', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ source_type, source_text, context }),
+    });
+    const data = await res.json();
+    if (!res.ok) { status.textContent = (data.error && data.error.message) || 'Failed.'; return; }
+    status.textContent = 'v' + data.version + ' generated (pending approval).';
+    document.getElementById('tpSourceText').value = '';
+    loadToneProfiles();
+    viewToneProfile(data.id);
+  } catch (e) {
+    status.textContent = 'Error: ' + e.message;
+  } finally {
+    btn.disabled = false; btn.textContent = 'Generate new version';
+    setTimeout(() => status.textContent = '', 4000);
+  }
+}
+
+async function viewToneProfile(profileId) {
+  // Reuse the list endpoint's data by pulling from the DOM would be brittle;
+  // re-fetch the full list and find this one. Cheap for a small version count.
+  const ctx = document.getElementById('tpContext').value;
+  const res = await fetch('/api/clients/' + currentClientId + '/tone-profiles?context=' + encodeURIComponent(ctx));
+  const profiles = await res.json();
+  const p = profiles.find(x => x.id === profileId);
+  if (!p) return;
+
+  let profile;
+  try { profile = JSON.parse(p.profile_json); } catch (e) { profile = null; }
+
+  const view = document.getElementById('tpProfileView');
+  view.style.display = 'block';
+  let html = '<div class="tp-profile-view">';
+  html += '<div style="font-size:13px;font-weight:600;margin-bottom:6px;">v' + p.version + ' &middot; ' + escapeHtml(p.source_type) + '</div>';
+  if (profile && profile.summary) {
+    html += '<div style="margin-bottom:12px;">' + escapeHtml(profile.summary) + '</div>';
+  }
+  if (profile && profile.voice_do) {
+    html += '<div style="font-weight:600;margin-top:8px;">Voice DOES:</div><ul class="tp-list">';
+    profile.voice_do.forEach(x => { html += '<li>' + escapeHtml(x) + '</li>'; });
+    html += '</ul>';
+  }
+  if (profile && profile.voice_dont) {
+    html += '<div style="font-weight:600;margin-top:8px;">Voice AVOIDS:</div><ul class="tp-list">';
+    profile.voice_dont.forEach(x => { html += '<li>' + escapeHtml(x) + '</li>'; });
+    html += '</ul>';
+  }
+  if (profile) {
+    html += '<div style="font-weight:600;margin-top:14px;margin-bottom:6px;">Categories (score / confidence)</div>';
+    html += '<div class="tp-cat-row" style="font-weight:600;color:var(--ink-mid);"><span>Category</span><span class="tp-cat-score">Score</span><span class="tp-cat-score">Conf.</span><span>Note / quote</span></div>';
+    Object.keys(profile).forEach(k => {
+      if (['summary','voice_do','voice_dont'].includes(k)) return;
+      const c = profile[k];
+      if (!c || typeof c !== 'object') return;
+      html += '<div class="tp-cat-row">'
+        + '<span class="tp-cat-name">' + escapeHtml(k.replace(/_/g,' ')) + '</span>'
+        + '<span class="tp-cat-score">' + (c.score != null ? c.score : '-') + '</span>'
+        + '<span class="tp-cat-score">' + (c.confidence != null ? c.confidence : '-') + '</span>'
+        + '<span>' + escapeHtml(c.note || '') + (c.supporting_quote ? '<div class="tp-cat-quote">"' + escapeHtml(c.supporting_quote) + '"</div>' : '') + '</span>'
+        + '</div>';
+    });
+  } else {
+    html += '<div style="color:var(--red);">Could not parse profile JSON.</div>';
+  }
+  html += '</div>';
+  view.innerHTML = html;
+}
+
+async function activateToneProfile(profileId) {
+  await fetch('/api/clients/' + currentClientId + '/tone-profiles/' + profileId + '/activate', { method: 'POST' });
+  loadToneProfiles();
+}
+
+async function rejectToneProfile(profileId) {
+  if (!confirm('Reject this version? It stays in history but never becomes active.')) return;
+  await fetch('/api/clients/' + currentClientId + '/tone-profiles/' + profileId + '/reject', { method: 'POST' });
+  loadToneProfiles();
 }
 
 // ---------- Style docs ----------

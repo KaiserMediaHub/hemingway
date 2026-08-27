@@ -47,6 +47,33 @@ CREATE TABLE IF NOT EXISTS posts (
     FOREIGN KEY (batch_id) REFERENCES batches(id) ON DELETE CASCADE
 );
 
+-- Tone Profile system (Ben's ask, 2026-08-27) -- versioned voice profiles
+-- per client and per context (default / event / podcast / founder-profile /
+-- etc.). Phase 1: profiles are generated and stored, but not yet wired into
+-- post generation -- that's Phase 2. Phase 3 adds the Delta Analyzer that
+-- learns from client edits and proposes new versions. Every version is kept
+-- forever so revert is trivial. Only one version per (client, context) is
+-- `is_active` at a time; new pending versions require Ben's approval before
+-- becoming active (protects against a single bad transcript silently
+-- warping the profile).
+CREATE TABLE IF NOT EXISTS tone_profiles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_id INTEGER NOT NULL,
+    context TEXT NOT NULL DEFAULT 'default',    -- 'default', 'event', 'podcast', etc.
+    version INTEGER NOT NULL,                   -- monotonically increasing per (client, context)
+    source_type TEXT NOT NULL,                  -- 'transcript', 'posts', 'delta', 'auto-transcript-queued'
+    source_text TEXT NOT NULL,                  -- the raw material fed in (transcript or posts)
+    profile_json TEXT NOT NULL,                 -- structured categories + confidence + supporting quotes
+    rejection_list TEXT DEFAULT '[]',           -- JSON array; empty on v1, grows via Delta Analyzer (Phase 3)
+    source_mix TEXT DEFAULT '{}',               -- running tally: {"spoken_chars": N, "written_chars": N}
+    change_summary TEXT DEFAULT '',             -- plain-language note about what changed vs. parent version
+    parent_version INTEGER,                     -- NULL for v1; else the version number this was derived from
+    status TEXT NOT NULL DEFAULT 'pending',     -- 'pending' | 'approved' | 'rejected'
+    is_active INTEGER NOT NULL DEFAULT 0,       -- 0/1; enforced by app.py, not DB (only one per client+context)
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (client_id) REFERENCES clients(id) ON DELETE CASCADE
+);
+
 -- Single-row table for the rules that apply to EVERY client (Ben's ask,
 -- 2026-08-24: "is there a spot where I can edit the global style? Things
 -- that every client needs"). Previously these were hardcoded in prompts.py

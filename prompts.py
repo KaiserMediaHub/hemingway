@@ -245,6 +245,119 @@ def build_review_user_prompt(draft, style_docs_text):
     return prompt
 
 
+# ---------------------------------------------------------------------------
+# Tone Profile system (Ben's ask, 2026-08-27).
+#
+# Phase 1: given either a raw transcript (30-90 min interview, "spoken") or
+# 10-15 previous posts ("written"), produce a structured JSON profile that
+# describes the voice across many dimensions. Every category carries a
+# CONFIDENCE value based on source volume -- three posts don't get to speak
+# for a whole voice the way 90 minutes of transcript can. Every score is
+# backed by a supporting_quote pulled directly from the source, so the
+# profile is auditable rather than an opaque set of numbers.
+#
+# The profile is INERT in Phase 1 -- it's stored but doesn't touch the
+# actual generation pipeline yet. That's Phase 2. Phase 3 adds the Delta
+# Analyzer that updates the profile based on client edits.
+# ---------------------------------------------------------------------------
+
+TONE_PROFILE_CATEGORIES = [
+    # Emotional register
+    'joy', 'confidence', 'vulnerability', 'humor', 'contrarianism',
+    # Rhetorical devices
+    'rhetoric', 'metaphor', 'question_usage', 'conjecture',
+    # Structure & pacing
+    'pace', 'sentence_length_variance', 'paragraph_rhythm', 'list_usage',
+    # Substance
+    'directness', 'concreteness', 'formality',
+    # Signature patterns
+    'opener_pattern', 'closer_pattern', 'signature_quirks',
+]
+
+
+def build_tone_profile_prompt(source_type, source_text, context='default'):
+    """Build the system + user prompt pair for generating a tone profile v1
+    from either a transcript or a set of previous posts.
+
+    source_type: 'transcript' (spoken) or 'posts' (written). Affects how the
+        prompt frames the analysis -- 'ums' are normal in one and diagnostic
+        in the other.
+    context: 'default', 'event', 'podcast', 'founder-profile', etc. Passed
+        through so the profile can be labeled; doesn't currently change the
+        prompt (all contexts share the same category list for now).
+    """
+    if source_type == 'transcript':
+        material_label = 'raw interview transcript (spoken material -- expect "ums", repetition, meandering)'
+        source_note = (
+            'This is how the person TALKS. Some traits transfer to writing '
+            '(word choice, worldview, humor); some don\'t (filler words, false '
+            'starts, verbal tics). Note which is which where relevant.'
+        )
+    else:
+        material_label = 'set of previous posts written by the person (written material -- final, polished output)'
+        source_note = (
+            'This is how the person WRITES. Every structural, punctuation, and '
+            'rhythm choice is deliberate. Sentence-length variance and paragraph '
+            'rhythm are especially trustworthy here.'
+        )
+
+    categories_block = ', '.join(TONE_PROFILE_CATEGORIES)
+
+    system = (
+        'You are a voice analyst. You will be given source material from a single '
+        'person and must produce a structured Tone Profile describing that person\'s '
+        'voice across many dimensions. Your output MUST be valid JSON only -- no '
+        'preamble, no markdown fences, no trailing commentary.\n\n'
+        f'The categories you MUST include (all of them, exact keys, in this order): {categories_block}\n\n'
+        'For each category, output an object with:\n'
+        '  - "score": integer 0-100 (0 = this trait is absent, 100 = extremely dominant)\n'
+        '  - "confidence": integer 0-100 (how much the SOURCE MATERIAL VOLUME supports '
+        'this reading -- 90 minutes of transcript = high confidence; 3 short posts = low)\n'
+        '  - "note": one short sentence describing what you observed (plain language, no jargon)\n'
+        '  - "supporting_quote": a direct quote from the source that supports the score '
+        '(exact text, under 200 chars). Use empty string ONLY if the trait is entirely absent.\n\n'
+        'Alongside the categories, include a top-level "summary" (2-3 sentence plain-language '
+        'description of the voice) and a "voice_do" list (3-6 concrete things the voice DOES) '
+        'and a "voice_dont" list (3-6 concrete things the voice AVOIDS or never does).\n\n'
+        'Be specific. "Confident" is not a useful note; "makes strong claims without hedging, '
+        'even when discussing contested topics" is. "Uses metaphor" is not useful; "reaches for '
+        'construction and building metaphors specifically when discussing team dynamics" is.\n\n'
+        'Confidence scoring rules (be honest, not generous):\n'
+        '  - Under ~1000 chars of source: confidence must be <=40 for every category.\n'
+        '  - 1000-5000 chars: confidence 40-70 range is appropriate.\n'
+        '  - Over 5000 chars: confidence can go 70-95, but never 100 -- voices always have '
+        'edge cases you haven\'t seen.\n\n'
+        f'{source_note}'
+    )
+
+    user = (
+        f'SOURCE MATERIAL ({material_label}), context label "{context}":\n\n'
+        '---\n'
+        f'{source_text[:60000]}\n'
+        '---\n\n'
+        'Produce the Tone Profile JSON now. Output ONLY the JSON object, nothing else.'
+    )
+
+    return system, user
+
+
+def build_tone_profile_change_summary_prompt(old_profile_json, new_profile_json):
+    """Given two profile JSONs, produce a short plain-language description of
+    what changed and why it might matter. Used to populate the change_summary
+    field so Ben can eyeball a version diff without staring at raw JSON."""
+    system = (
+        'You compare two Tone Profile JSON objects and describe what changed in plain language. '
+        'Focus on category scores that moved by more than 10 points, and any voice_do / voice_dont '
+        'items that were added or removed. Output ONLY 2-4 short sentences, no lists, no preamble. '
+        'If nothing meaningful changed, say so bluntly.'
+    )
+    user = (
+        f'OLD PROFILE:\n{old_profile_json}\n\n---\n\nNEW PROFILE:\n{new_profile_json}\n\n'
+        'Describe what changed in 2-4 sentences.'
+    )
+    return system, user
+
+
 def split_transcript(text):
     """Parse Degas transcript format: 'VIDEO: 01 - Title.mp4'"""
     sections = []
