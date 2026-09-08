@@ -467,6 +467,88 @@ def build_tone_profile_change_summary_prompt(old_profile_json, new_profile_json)
     return system, user
 
 
+# ---------------------------------------------------------------------------
+# Delta Analyzer (Phase 3, Ben's ask 2026-09-03).
+#
+# Input: a post Hemingway wrote (original_post) and what the client actually
+# edited it to (client_edit) -- real, high-signal ground truth about the
+# client's voice. Two calls:
+#   1. build_delta_analysis_prompt -- reads the diff between the two posts
+#      against the CURRENT active profile and proposes an updated profile
+#      (same JSON shape as Phase 1) plus a plain-language diff_analysis and
+#      a list of rejection_additions (specific phrases/patterns the client
+#      visibly cut, to accumulate in the profile's rejection_list over time).
+#   2. build_delta_regenerate_prompt -- attempts to rewrite the ORIGINAL
+#      post's underlying topic/content from scratch using the proposed
+#      profile, so Ben can eyeball how close it got to the client's real
+#      edit. No automated match score -- Ben is the judge (see db.py's
+#      tone_deltas comment for why: Claude grading its own output would be
+#      charitable to itself).
+# ---------------------------------------------------------------------------
+
+def build_delta_analysis_prompt(original_post, client_edit, current_profile_json, context='default'):
+    categories_block = ', '.join(TONE_PROFILE_CATEGORIES)
+    system = (
+        'You are a voice analyst refining an existing Tone Profile using a real, high-signal example: '
+        'a post that was written one way, and a client\'s own edit of it. The client\'s edit is ground '
+        'truth about their actual voice -- more reliable than the original profile wherever they conflict.\n\n'
+        'You will be given the CURRENT profile (JSON) plus the original post and the client\'s edited '
+        'version. Produce an UPDATED profile in the EXACT SAME JSON shape as the current one:\n\n'
+        f'Required category keys (all of them, exact keys): {categories_block}\n\n'
+        'Each category needs: "score" (0-100), "confidence" (0-100), "note" (one plain-language '
+        'sentence), "supporting_quote" (a short quote backing the score, from EITHER the original '
+        'source material reasoning or, preferably, directly from the client\'s edit if it demonstrates '
+        'that trait).\n\n'
+        'Rules for updating:\n'
+        '  - Only change a category\'s score/note/quote if the client\'s edit gives real evidence for a '
+        'change. If the edit doesn\'t touch a trait, carry that category over from the current profile '
+        'UNCHANGED (same score, confidence, note, quote) -- do not invent drift.\n'
+        '  - When you DO change a category based on this edit, confidence should rise (this is now '
+        'backed by two data points instead of one) unless the edit only weakly implies the change.\n'
+        '  - Update "summary", "voice_do", and "voice_dont" only if the edit reveals something not '
+        'already captured there.\n\n'
+        'Also produce a top-level "diff_analysis": 2-4 plain-language sentences describing what '
+        'actually changed between the original and the client\'s edit (sentence length, directness, '
+        'specific phrases cut, structure, closer, etc.) -- this is shown to a human, be concrete and '
+        'specific, not vague ("tone improved" is useless; "cut the rhetorical-question opener and '
+        'replaced it with a direct claim" is useful).\n\n'
+        'Also produce a top-level "rejection_additions": a JSON array of specific phrases, sentence '
+        'patterns, or structural habits the client\'s edit REMOVED or clearly avoided -- these accumulate '
+        'over time into a per-client "never do this" list. Only include something here if it\'s a clear, '
+        'specific, reusable pattern (e.g. "opening with a rhetorical question", "the phrase \'at the end '
+        'of the day\'"), not vague impressions. Return an empty array if nothing qualifies -- do not '
+        'force entries.\n\n'
+        'Output ONLY valid JSON: {"diff_analysis": "...", "rejection_additions": [...], '
+        '<all the profile fields: summary, voice_do, voice_dont, and every category key above>}. '
+        'No markdown fences, no preamble.'
+    )
+    user = (
+        f'CURRENT PROFILE (context: "{context}"):\n{current_profile_json}\n\n'
+        f'ORIGINAL POST (what was written):\n---\n{original_post}\n---\n\n'
+        f'CLIENT\'S EDITED VERSION (what they actually changed it to):\n---\n{client_edit}\n---\n\n'
+        'Produce the updated profile JSON now, per the system instructions.'
+    )
+    return system, user
+
+
+def build_delta_regenerate_user_prompt(original_post):
+    """User prompt for the 'try to close the gap' regeneration -- rewrites
+    the ORIGINAL post's underlying content/topic from scratch using
+    whatever active_tone_profile is passed into build_system_prompt() by
+    the caller. Deliberately does NOT show the client's edit here -- the
+    regeneration should succeed (or not) purely on the strength of the
+    updated profile, not by being handed the answer to copy from."""
+    return (
+        'Below is a LinkedIn post. Identify the core topic, story, and point it makes. Then write a '
+        'COMPLETELY NEW version of a post covering that same underlying content, from scratch, in the '
+        'voice described in your system prompt. Do not reuse phrasing, sentence structure, or specific '
+        'wording from the post below -- use it only to understand what the post is ABOUT, then write '
+        'independently.\n\n'
+        f'SOURCE POST (for content/topic only, not for phrasing):\n---\n{original_post}\n---\n\n'
+        'Output only the finished post text, no preamble or explanation.'
+    )
+
+
 def split_transcript(text):
     """Parse Degas transcript format: 'VIDEO: 01 - Title.mp4'"""
     sections = []

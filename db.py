@@ -74,6 +74,29 @@ CREATE TABLE IF NOT EXISTS tone_profiles (
     FOREIGN KEY (client_id) REFERENCES clients(id) ON DELETE CASCADE
 );
 
+-- Delta Analyzer (Phase 3, Ben's ask 2026-09-03): given a post Hemingway
+-- wrote (original_post) and what the client actually changed it to
+-- (client_edit), propose an updated Tone Profile version and immediately
+-- attempt to regenerate the SAME topic using it, so Ben can eyeball how
+-- close the regeneration got to the client's real edit without any
+-- self-graded "match score" (Claude grading its own output would be
+-- charitable to itself -- Ben is the judge, same principle discussed for
+-- why this app doesn't do automated quality gates). One row per attempt;
+-- resulting_version points at the pending tone_profiles row this attempt
+-- produced, which Ben activates/rejects via the existing Phase 1 routes.
+CREATE TABLE IF NOT EXISTS tone_deltas (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_id           INTEGER NOT NULL,
+    context             TEXT NOT NULL DEFAULT 'default',
+    original_post       TEXT NOT NULL,     -- what Hemingway wrote (Box A)
+    client_edit         TEXT NOT NULL,     -- what the client changed it to (Box B)
+    diff_analysis        TEXT DEFAULT '',   -- plain-language explanation of what changed
+    resulting_version    INTEGER,           -- tone_profiles.version this attempt produced
+    regenerated_attempt  TEXT DEFAULT '',   -- Hemingway's rewrite attempt using the proposed profile
+    created_at          TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (client_id) REFERENCES clients(id) ON DELETE CASCADE
+);
+
 -- Single-row table for the rules that apply to EVERY client (Ben's ask,
 -- 2026-08-24: "is there a spot where I can edit the global style? Things
 -- that every client needs"). Previously these were hardcoded in prompts.py

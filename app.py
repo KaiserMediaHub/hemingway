@@ -10,6 +10,7 @@ from prompts import (
     build_system_prompt, build_user_prompt, split_transcript, split_transcript_plain,
     build_review_system_prompt, build_review_user_prompt,
     build_tone_profile_prompt, build_tone_profile_change_summary_prompt,
+    build_delta_analysis_prompt, build_delta_regenerate_user_prompt,
     TONE_PROFILE_CATEGORIES,
 )
 
@@ -372,6 +373,175 @@ def reject_tone_profile(client_id, profile_id):
     db.execute("UPDATE tone_profiles SET status = 'rejected' WHERE id = ?", (profile_id,))
     db.commit()
     return jsonify({'ok': True})
+
+
+# ---------- Delta Analyzer (Phase 3, Ben's ask 2026-09-03) ----------
+# Box A (original post) / Box B (client's edit) -> propose an updated Tone
+# Profile version (pending, same activate/reject flow as Phase 1) + attempt
+# to regenerate the same topic using it, so Ben can eyeball how close it
+# got. See prompts.py's Delta Analyzer section and db.py's tone_deltas
+# comment for the reasoning (no self-graded match score -- Ben judges).
+
+def _extract_json_object(raw):
+    """Same defensive fence-stripping as create_tone_profile() -- the
+    prompt asks for pure JSON but strip accidental markdown fences."""
+    cleaned = (raw or '').strip()
+    if cleaned.startswith('```'):
+        cleaned = cleaned.strip('`')
+        if cleaned.lower().startswith('json'):
+            cleaned = cleaned[4:].strip()
+    return json.loads(cleaned)
+
+
+@app.route('/api/clients/<int:client_id>/tone-profiles/delta', methods=['POST'])
+@require_auth
+def run_delta_analyzer(client_id):
+    """Step 1+2 combined: analyze the original/edit pair against the
+    current active profile, propose an updated version (pending), then
+    immediately attempt a regeneration of the same topic using it."""
+    data = request.get_json() or {}
+    context = (data.get('context') or 'default').strip() or 'default'
+    original_post = (data.get('original_post') or '').strip()
+    client_edit = (data.get('client_edit') or '').strip()
+
+    if len(original_post) < 20 or len(client_edit) < 20:
+        return jsonify({'error': {'message': 'Both the original post and the client\'s edit are required (min 20 chars each).'}}), 400
+
+    db = get_db()
+    if not db.execute('SELECT id FROM clients WHERE id = ?', (client_id,)).fetchone():
+        return jsonify({'error': {'message': 'Client not found.'}}), 404
+
+    active = db.execute(
+        'SELECT * FROM tone_profiles WHERE client_id = ? AND context = ? AND is_active = 1',
+        (client_id, context)
+    ).fetchone()
+    if not active:
+        return jsonify({'error': {'message': f'No active Tone Profile for context "{context}" yet -- generate and activate one first (Phase 1) before running the Delta Analyzer.'}}), 400
+
+    # Step 1: analyze the diff, propose an updated profile.
+    system, user = build_delta_analysis_prompt(original_post, client_edit, active['profile_json'], context=context)
+    try:
+        raw = call_anthropic(model='claude-sonnet-4-5', max_tokens=4000, system=system,
+                             messages=[{'role': 'user', 'content': user}])
+        result = _extract_json_object(raw)
+    except json.JSONDecodeError as e:
+        return jsonify({'error': {'message': f'Model returned invalid JSON for the profile update: {e}'}}), 502
+    except Exception as e:
+        return jsonify({'error': {'message': f'Delta analysis failed: {e}'}}), 502
+
+    diff_analysis = result.pop('diff_analysis', '')
+    rejection_additions = result.pop('rejection_additions', []) or []
+    updated_profile = result  # whatever's left is the profile fields (summary, voice_do, categories, etc.)
+
+    # Merge rejection lists -- union, dedup, preserve order (old entries first).
+    try:
+        old_rejections = json.loads(active['rejection_list'] or '[]')
+    except (TypeError, ValueError):
+        old_rejections = []
+    merged_rejections = list(old_rejections)
+    for item in rejection_additions:
+        if item not in merged_rejections:
+            merged_rejections.append(item)
+
+    # source_mix: the client's own edit is real written-voice evidence --
+    # carry the parent's mix forward and add the edit's length to written_chars.
+    try:
+        parent_mix = json.loads(active['source_mix'] or '{}')
+    except (TypeError, ValueError):
+        parent_mix = {}
+    source_mix = {
+        'spoken_chars': parent_mix.get('spoken_chars', 0),
+        'written_chars': parent_mix.get('written_chars', 0) + len(client_edit),
+    }
+
+    next_version = active['version'] + 1
+    source_text = f'ORIGINAL:\n{original_post}\n\n---CLIENT EDIT---\n{client_edit}'
+    profile_json_str = json.dumps(updated_profile, ensure_ascii=False)
+
+    cur = db.execute(
+        'INSERT INTO tone_profiles (client_id, context, version, source_type, source_text, '
+        'profile_json, rejection_list, source_mix, change_summary, parent_version, status, is_active) '
+        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        (client_id, context, next_version, 'delta', source_text, profile_json_str,
+         json.dumps(merged_rejections), json.dumps(source_mix), diff_analysis, active['version'], 'pending', 0)
+    )
+    db.commit()
+    new_profile_id = cur.lastrowid
+
+    # Step 2: attempt to regenerate the same topic using the proposed profile.
+    regen_system = build_system_prompt('conversational', client_rules='', active_tone_profile=updated_profile)
+    regen_user = build_delta_regenerate_user_prompt(original_post)
+    try:
+        regenerated_attempt = call_anthropic(model='claude-sonnet-4-5', max_tokens=1200,
+                                             system=regen_system, messages=[{'role': 'user', 'content': regen_user}])
+    except Exception as e:
+        regenerated_attempt = f'(regeneration failed: {e})'
+
+    delta_cur = db.execute(
+        'INSERT INTO tone_deltas (client_id, context, original_post, client_edit, diff_analysis, '
+        'resulting_version, regenerated_attempt) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        (client_id, context, original_post, client_edit, diff_analysis, next_version, regenerated_attempt)
+    )
+    db.commit()
+    delta_id = delta_cur.lastrowid
+
+    new_profile_row = db.execute('SELECT * FROM tone_profiles WHERE id = ?', (new_profile_id,)).fetchone()
+    delta_row = db.execute('SELECT * FROM tone_deltas WHERE id = ?', (delta_id,)).fetchone()
+    return jsonify({'tone_profile': dict(new_profile_row), 'delta': dict(delta_row)})
+
+
+@app.route('/api/clients/<int:client_id>/tone-profiles/deltas/<int:delta_id>/regenerate-again', methods=['POST'])
+@require_auth
+def regenerate_delta_again(client_id, delta_id):
+    """Retry JUST the regeneration attempt using the SAME pending profile
+    version -- doesn't re-run the diff analysis. This is the 'Regenerate'
+    retry button: try again until it's close enough, or give up and reject."""
+    db = get_db()
+    delta = db.execute('SELECT * FROM tone_deltas WHERE id = ? AND client_id = ?', (delta_id, client_id)).fetchone()
+    if not delta:
+        return jsonify({'error': {'message': 'Delta attempt not found for this client.'}}), 404
+
+    profile_row = db.execute(
+        'SELECT * FROM tone_profiles WHERE client_id = ? AND context = ? AND version = ?',
+        (client_id, delta['context'], delta['resulting_version'])
+    ).fetchone()
+    if not profile_row:
+        return jsonify({'error': {'message': 'The proposed profile version for this attempt no longer exists.'}}), 404
+
+    try:
+        updated_profile = json.loads(profile_row['profile_json'])
+    except (TypeError, ValueError):
+        return jsonify({'error': {'message': 'Stored profile JSON is corrupt.'}}), 500
+
+    regen_system = build_system_prompt('conversational', client_rules='', active_tone_profile=updated_profile)
+    regen_user = build_delta_regenerate_user_prompt(delta['original_post'])
+    try:
+        regenerated_attempt = call_anthropic(model='claude-sonnet-4-5', max_tokens=1200,
+                                             system=regen_system, messages=[{'role': 'user', 'content': regen_user}])
+    except Exception as e:
+        return jsonify({'error': {'message': f'Regeneration failed: {e}'}}), 502
+
+    db.execute('UPDATE tone_deltas SET regenerated_attempt = ? WHERE id = ?', (regenerated_attempt, delta_id))
+    db.commit()
+    updated = db.execute('SELECT * FROM tone_deltas WHERE id = ?', (delta_id,)).fetchone()
+    return jsonify(dict(updated))
+
+
+@app.route('/api/clients/<int:client_id>/tone-profiles/deltas', methods=['GET'])
+@require_auth
+def list_deltas(client_id):
+    context = request.args.get('context')
+    db = get_db()
+    if context:
+        rows = db.execute(
+            'SELECT * FROM tone_deltas WHERE client_id = ? AND context = ? ORDER BY created_at DESC',
+            (client_id, context)
+        ).fetchall()
+    else:
+        rows = db.execute(
+            'SELECT * FROM tone_deltas WHERE client_id = ? ORDER BY created_at DESC', (client_id,)
+        ).fetchall()
+    return jsonify([dict(r) for r in rows])
 
 
 # ---------- Style Docs ----------

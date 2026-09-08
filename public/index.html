@@ -302,7 +302,7 @@
         <div class="tab-panel" id="tab-style">
           <!-- ===== Tone Profile (Phase 1) ===== -->
           <div class="card">
-            <div class="card-title">Tone Profile <span style="font-size:11px;color:var(--ink-light);font-weight:400;">(Phase 1 preview — not yet wired into generation)</span></div>
+            <div class="card-title">Tone Profile <span style="font-size:11px;color:var(--ink-light);font-weight:400;">(the active version drives Write Posts for this client/context)</span></div>
             <div class="card-sub">Paste a long-form transcript (spoken) or 10-15 past posts (written). Get back a structured profile of this client's voice. Every version is saved; activate one to make it the current profile for this context.</div>
 
             <div class="tp-header">
@@ -334,6 +334,61 @@
             </div>
 
             <div id="tpProfileView" style="display:none;"></div>
+          </div>
+
+          <!-- ===== Delta Analyzer (Phase 3) ===== -->
+          <div class="card">
+            <div class="card-title">Delta Analyzer</div>
+            <div class="card-sub">Paste a post Hemingway wrote and what the client actually changed it to. Hemingway proposes an updated Tone Profile version and tries to recreate the client's edit using it -- you judge whether it closed the gap.</div>
+
+            <div id="deltaNoProfileWarning" class="tp-active-banner" style="display:none;border-left-color:#c0392b;">
+              No active Tone Profile for this context yet. Generate and activate one above before running the Delta Analyzer.
+            </div>
+
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:10px;">
+              <div>
+                <label style="font-size:12px;font-weight:600;color:var(--ink-mid);">Box A — what Hemingway wrote</label>
+                <textarea id="deltaOriginal" rows="8" placeholder="Paste the original generated post..."></textarea>
+              </div>
+              <div>
+                <label style="font-size:12px;font-weight:600;color:var(--ink-mid);">Box B — what the client changed it to</label>
+                <textarea id="deltaEdit" rows="8" placeholder="Paste the client's edited version..."></textarea>
+              </div>
+            </div>
+            <div style="display:flex;gap:8px;margin-top:10px;align-items:center;">
+              <button class="btn primary" onclick="runDeltaAnalyzer()" id="deltaRunBtn">Analyze &amp; Regenerate</button>
+              <span class="status" id="deltaStatus"></span>
+            </div>
+
+            <div id="deltaResult" style="display:none;margin-top:20px;">
+              <div class="tp-profile-view">
+                <div style="font-weight:600;margin-bottom:6px;">What changed (v<span id="deltaNewVersion"></span> proposed)</div>
+                <div id="deltaDiffAnalysis" style="margin-bottom:14px;"></div>
+
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;">
+                  <div>
+                    <div style="font-weight:600;margin-bottom:6px;color:var(--ink-mid);">Client's actual edit (Box B)</div>
+                    <div id="deltaClientEditDisplay" style="white-space:pre-wrap;background:var(--white);border:1px solid var(--border);border-radius:8px;padding:10px;font-size:13px;"></div>
+                  </div>
+                  <div>
+                    <div style="font-weight:600;margin-bottom:6px;color:var(--ink-mid);">Hemingway's regeneration attempt</div>
+                    <div id="deltaRegenDisplay" style="white-space:pre-wrap;background:var(--white);border:1px solid var(--border);border-radius:8px;padding:10px;font-size:13px;"></div>
+                  </div>
+                </div>
+
+                <div style="display:flex;gap:8px;margin-top:16px;align-items:center;flex-wrap:wrap;">
+                  <button class="btn" onclick="regenerateDeltaAgain()" id="deltaRegenBtn">Regenerate again</button>
+                  <button class="btn primary" onclick="closeDeltaGap(true)">Yes — gap closed, activate v<span id="deltaNewVersion2"></span></button>
+                  <button class="btn" onclick="closeDeltaGap(false)" style="color:#c0392b;">No — reject this version</button>
+                  <span class="status" id="deltaActionStatus"></span>
+                </div>
+              </div>
+            </div>
+
+            <div style="margin-top:20px;">
+              <div style="font-size:12px;font-weight:600;color:var(--ink-mid);margin-bottom:8px;">Past attempts</div>
+              <div id="deltaHistoryList"><div style="font-size:12px;color:var(--ink-light);">Loading...</div></div>
+            </div>
           </div>
 
           <div class="card">
@@ -679,6 +734,15 @@ async function loadToneProfiles() {
     banner.style.display = 'none';
   }
 
+  // Delta Analyzer needs an active profile to diff against
+  const deltaWarning = document.getElementById('deltaNoProfileWarning');
+  const deltaRunBtn = document.getElementById('deltaRunBtn');
+  if (deltaWarning && deltaRunBtn) {
+    deltaWarning.style.display = active ? 'none' : 'block';
+    deltaRunBtn.disabled = !active;
+  }
+  loadDeltaHistory();
+
   // Version list
   const list = document.getElementById('tpVersionList');
   if (!profiles.length) {
@@ -803,6 +867,141 @@ async function rejectToneProfile(profileId) {
   if (!confirm('Reject this version? It stays in history but never becomes active.')) return;
   await fetch('/api/clients/' + currentClientId + '/tone-profiles/' + profileId + '/reject', { method: 'POST' });
   loadToneProfiles();
+}
+
+// ---------- Delta Analyzer (Phase 3) ----------
+// Learns from a real client edit: Box A is what Hemingway wrote, Box B is
+// what the client changed it to. Proposes an updated Tone Profile version
+// and immediately tries to regenerate the same topic with it, so Ben can
+// eyeball the gap himself -- no self-graded match score (same principle as
+// the rest of this app: Claude doesn't grade its own output).
+let currentDeltaId = null;
+let currentDeltaProfileId = null;
+
+async function runDeltaAnalyzer() {
+  if (!currentClientId) return;
+  const context = document.getElementById('tpContext').value;
+  const original_post = document.getElementById('deltaOriginal').value.trim();
+  const client_edit = document.getElementById('deltaEdit').value.trim();
+  const status = document.getElementById('deltaStatus');
+  const btn = document.getElementById('deltaRunBtn');
+
+  if (original_post.length < 20 || client_edit.length < 20) {
+    status.textContent = 'Paste both the original post and the client\'s edit first.';
+    return;
+  }
+
+  btn.disabled = true; btn.textContent = 'Analyzing...'; status.textContent = '';
+  document.getElementById('deltaResult').style.display = 'none';
+  try {
+    const res = await fetch('/api/clients/' + currentClientId + '/tone-profiles/delta', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ context, original_post, client_edit }),
+    });
+    const data = await res.json();
+    if (!res.ok) { status.textContent = (data.error && data.error.message) || 'Failed.'; return; }
+    renderDeltaResult(data.tone_profile, data.delta, client_edit);
+    status.textContent = 'Proposed v' + data.tone_profile.version + '.';
+  } catch (e) {
+    status.textContent = 'Error: ' + e.message;
+  } finally {
+    btn.disabled = false; btn.textContent = 'Analyze & Regenerate';
+    setTimeout(() => status.textContent = '', 4000);
+  }
+}
+
+function renderDeltaResult(toneProfile, delta, clientEditText) {
+  currentDeltaId = delta.id;
+  currentDeltaProfileId = toneProfile.id;
+
+  document.getElementById('deltaResult').style.display = 'block';
+  document.getElementById('deltaNewVersion').textContent = toneProfile.version;
+  document.getElementById('deltaNewVersion2').textContent = toneProfile.version;
+  document.getElementById('deltaDiffAnalysis').textContent = delta.diff_analysis || '(no summary returned)';
+  document.getElementById('deltaClientEditDisplay').textContent = clientEditText;
+  document.getElementById('deltaRegenDisplay').textContent = delta.regenerated_attempt || '(regeneration failed -- see status)';
+  document.getElementById('deltaActionStatus').textContent = '';
+}
+
+async function regenerateDeltaAgain() {
+  if (!currentDeltaId) return;
+  const btn = document.getElementById('deltaRegenBtn');
+  const status = document.getElementById('deltaActionStatus');
+  btn.disabled = true; btn.textContent = 'Regenerating...';
+  try {
+    const res = await fetch('/api/clients/' + currentClientId + '/tone-profiles/deltas/' + currentDeltaId + '/regenerate-again', { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) { status.textContent = (data.error && data.error.message) || 'Failed.'; return; }
+    document.getElementById('deltaRegenDisplay').textContent = data.regenerated_attempt || '(regeneration failed)';
+    status.textContent = 'Regenerated.';
+  } catch (e) {
+    status.textContent = 'Error: ' + e.message;
+  } finally {
+    btn.disabled = false; btn.textContent = 'Regenerate again';
+    setTimeout(() => status.textContent = '', 3000);
+  }
+}
+
+async function closeDeltaGap(activate) {
+  if (!currentDeltaProfileId) return;
+  const status = document.getElementById('deltaActionStatus');
+  if (activate) {
+    await activateToneProfile(currentDeltaProfileId);
+    status.textContent = 'Activated.';
+  } else {
+    if (!confirm('Reject this version? It stays in history but never becomes active.')) return;
+    await fetch('/api/clients/' + currentClientId + '/tone-profiles/' + currentDeltaProfileId + '/reject', { method: 'POST' });
+    loadToneProfiles();
+    status.textContent = 'Rejected.';
+  }
+  document.getElementById('deltaResult').style.display = 'none';
+  document.getElementById('deltaOriginal').value = '';
+  document.getElementById('deltaEdit').value = '';
+  currentDeltaId = null; currentDeltaProfileId = null;
+}
+
+async function loadDeltaHistory() {
+  if (!currentClientId) return;
+  const ctx = document.getElementById('tpContext').value;
+  const list = document.getElementById('deltaHistoryList');
+  if (!list) return;
+  try {
+    const res = await fetch('/api/clients/' + currentClientId + '/tone-profiles/deltas?context=' + encodeURIComponent(ctx));
+    const deltas = await res.json();
+    if (!deltas.length) {
+      list.innerHTML = '<div style="font-size:12px;color:var(--ink-light);">No attempts yet.</div>';
+      return;
+    }
+    list.innerHTML = '';
+    deltas.forEach(d => {
+      const row = document.createElement('div');
+      row.className = 'tp-version-row';
+      row.style.cursor = 'pointer';
+      row.innerHTML =
+        '<div class="tp-version-meta">'
+          + '<b>&rarr; v' + (d.resulting_version != null ? d.resulting_version : '?') + '</b>'
+          + '<span style="color:var(--ink-light);">' + new Date(d.created_at + 'Z').toLocaleString() + '</span>'
+        + '</div>'
+        + '<div style="font-size:11px;color:var(--ink-light);margin-top:4px;width:100%;">' + escapeHtml(d.diff_analysis || '') + '</div>';
+      row.onclick = () => {
+        document.getElementById('deltaOriginal').value = d.original_post;
+        document.getElementById('deltaEdit').value = d.client_edit;
+        renderDeltaResult({ id: null, version: d.resulting_version }, d, d.client_edit);
+        // Re-find the actual tone_profile id for this resulting_version so
+        // activate/reject buttons target the right row.
+        fetch('/api/clients/' + currentClientId + '/tone-profiles?context=' + encodeURIComponent(ctx))
+          .then(r => r.json())
+          .then(profiles => {
+            const p = profiles.find(x => x.version === d.resulting_version);
+            if (p) currentDeltaProfileId = p.id;
+          });
+        window.scrollTo({ top: document.getElementById('deltaResult').offsetTop - 80, behavior: 'smooth' });
+      };
+      list.appendChild(row);
+    });
+  } catch (e) {
+    list.innerHTML = '<div style="font-size:12px;color:var(--red);">Failed to load history.</div>';
+  }
 }
 
 // ---------- Style docs ----------
