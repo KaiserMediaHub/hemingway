@@ -139,9 +139,17 @@ def render_tone_profile_for_prompt(profile_dict, example_posts=None, target_leng
         cleaned_examples = [e for e in example_posts if isinstance(e, str) and e.strip()][:3]
         if cleaned_examples:
             parts.append(
-                'REAL EXAMPLES OF THIS CLIENT\'S OWN VOICE — study these directly. They are higher '
-                'signal than the category breakdown below; if the two ever conflict, follow these '
-                'examples:\n'
+                'REAL EXAMPLES OF THIS CLIENT\'S OWN VOICE — study these directly for word choice, '
+                'sentence rhythm, punctuation habits, and structural patterns (opener style, how '
+                'paragraphs break, closer style). They are higher signal than the category breakdown '
+                'below for THOSE THINGS; if the two ever conflict on voice mechanics, follow these '
+                'examples.\n\n'
+                'CRITICAL — these examples are from DIFFERENT posts about DIFFERENT topics than the one '
+                'you are writing now. Never reuse their sentences, phrases, specific claims, stories, or '
+                'topic content. If you catch yourself reproducing a sentence from an example almost '
+                'word-for-word, stop -- that means you are copying instead of imitating voice. Write '
+                'entirely new content about the actual topic given to you, using only the RHYTHM and '
+                'WORD-CHOICE patterns these examples demonstrate.\n'
             )
             for i, ex in enumerate(cleaned_examples, 1):
                 parts.append(f'--- Example {i} ---\n{ex.strip()}\n--- end example {i} ---\n')

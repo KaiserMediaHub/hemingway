@@ -541,9 +541,20 @@ def run_delta_analyzer(client_id):
     new_profile_id = cur.lastrowid
 
     # Step 2: attempt to regenerate the same topic using the proposed profile.
+    #
+    # BUG FIXED 2026-09-08 (Ben caught this in real use -- regenerations were
+    # just repeating one client post verbatim regardless of the post's topic):
+    # example_posts_json above already has THIS pair's client_edit merged in.
+    # Handing that straight to the regeneration call means the model is shown
+    # the exact answer it's being tested against and, unsurprisingly, just
+    # pastes it back. The regen step must only see examples that predate this
+    # test -- current pair's client_edit is excluded here, added back for
+    # everything downstream (real generation, future delta runs) once this
+    # version is stored/activated, where it's legitimately historical.
+    regen_only_examples = [e for e in json.loads(example_posts_json) if e != client_edit]
     regen_system = build_system_prompt(
         'conversational', client_rules='', active_tone_profile=updated_profile,
-        example_posts=json.loads(example_posts_json), target_length=json.loads(target_length_json),
+        example_posts=regen_only_examples, target_length=json.loads(target_length_json),
     )
     regen_user = build_delta_regenerate_user_prompt(original_post)
     try:
@@ -597,9 +608,14 @@ def regenerate_delta_again(client_id, delta_id):
     except (TypeError, ValueError):
         target_length = {}
 
+    # Same leakage fix as run_delta_analyzer -- this pending profile's own
+    # example_posts includes THIS delta's client_edit (the answer), which
+    # must never be shown to the regeneration call it's being tested against.
+    regen_only_examples = [e for e in example_posts if e != delta['client_edit']]
+
     regen_system = build_system_prompt(
         'conversational', client_rules='', active_tone_profile=updated_profile,
-        example_posts=example_posts, target_length=target_length,
+        example_posts=regen_only_examples, target_length=target_length,
     )
     regen_user = build_delta_regenerate_user_prompt(delta['original_post'])
     try:

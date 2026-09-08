@@ -257,6 +257,34 @@ def test_regen_system_prompt_includes_examples_and_length():
     os.remove(db_path)
 
 
+def test_regen_does_not_leak_current_pair_answer():
+    """Bug found by Ben in real use, 2026-09-08: the regeneration attempt was
+    just repeating the client's own edit verbatim, regardless of the post's
+    actual topic. Root cause: THIS pair's client_edit gets merged into
+    example_posts before the regen call runs, so the model was literally
+    handed the answer as a 'follow this' example. This must never happen --
+    the regen prompt must not contain the client_edit for the pair currently
+    being tested, even when it's the ONLY example on file (the worst case,
+    since with nothing else to draw on the model has maximum incentive to
+    just paste the one thing it was shown)."""
+    db_path = os.path.join(tempfile.gettempdir(), "hemingway_test_mem_8.db")
+    app_module = _fresh_app(db_path)
+    _seed_client_with_active_profile(db_path)  # no example_posts on file yet
+    client = _client(app_module)
+
+    LAST_SYSTEM_PROMPT.clear()
+    client_edit = "This is the exact answer the client wrote, must not leak."
+    with patch.object(app_module, "call_anthropic", side_effect=_fake_call_anthropic):
+        client.post("/api/clients/1/tone-profiles/delta", json={
+            "context": "default",
+            "original_post": "This is the original post about our launch." * 2,
+            "client_edit": client_edit,
+        })
+    regen_prompt = LAST_SYSTEM_PROMPT.get('regen', '')
+    assert client_edit not in regen_prompt, "current pair's own client edit leaked into its own regen test"
+    os.remove(db_path)
+
+
 def test_regenerate_again_reuses_stored_examples_not_recomputed():
     db_path = os.path.join(tempfile.gettempdir(), "hemingway_test_mem_7.db")
     app_module = _fresh_app(db_path)
@@ -276,8 +304,14 @@ def test_regenerate_again_reuses_stored_examples_not_recomputed():
         resp2 = client.post(f"/api/clients/1/tone-profiles/deltas/{delta_id}/regenerate-again")
     assert resp2.status_code == 200, resp2.get_json()
     regen_prompt = LAST_SYSTEM_PROMPT.get('regen', '')
+    # Prior, legitimate example should still be there...
     assert "Original stored example post text." in regen_prompt
-    assert "A totally new client edit example." in regen_prompt
+    # ...but THIS delta's own client_edit is the answer being tested against
+    # and must NOT leak into the regeneration prompt (bug found by Ben in
+    # real use, 2026-09-08: regenerations were just parroting the client's
+    # actual edit back because it was sitting in the prompt as a "follow
+    # this" example).
+    assert "A totally new client edit example." not in regen_prompt
     os.remove(db_path)
 
 
@@ -289,6 +323,7 @@ if __name__ == "__main__":
         test_example_posts_accumulate_capped_at_three,
         test_target_length_derived_from_example_posts,
         test_regen_system_prompt_includes_examples_and_length,
+        test_regen_does_not_leak_current_pair_answer,
         test_regenerate_again_reuses_stored_examples_not_recomputed,
     ]
     for t in tests:
