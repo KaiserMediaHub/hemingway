@@ -773,6 +773,12 @@ async function loadToneProfiles() {
       s.textContent = summary;
       row.appendChild(s);
     }
+    if (p.status === 'rejected' && p.rejection_reason) {
+      const r = document.createElement('div');
+      r.style.cssText = 'font-size:11px;color:#c0392b;margin-top:2px;width:100%;';
+      r.textContent = 'Rejected because: ' + p.rejection_reason;
+      row.appendChild(r);
+    }
     list.appendChild(row);
   });
 }
@@ -823,6 +829,16 @@ async function viewToneProfile(profileId) {
   view.style.display = 'block';
   let html = '<div class="tp-profile-view">';
   html += '<div style="font-size:13px;font-weight:600;margin-bottom:6px;">v' + p.version + ' &middot; ' + escapeHtml(p.source_type) + '</div>';
+  try {
+    const examples = p.example_posts ? JSON.parse(p.example_posts) : [];
+    const tlen = p.target_length ? JSON.parse(p.target_length) : {};
+    if (examples.length || tlen.avg_words) {
+      html += '<div style="font-size:12px;color:var(--ink-light);margin-bottom:10px;">'
+        + examples.length + ' raw voice example(s) on file'
+        + (tlen.avg_words ? ' &middot; target length ~' + tlen.avg_words + ' words (' + tlen.min_words + '-' + tlen.max_words + ' observed)' : '')
+        + '</div>';
+    }
+  } catch (e) { /* ignore malformed extras */ }
   if (profile && profile.summary) {
     html += '<div style="margin-bottom:12px;">' + escapeHtml(profile.summary) + '</div>';
   }
@@ -865,7 +881,11 @@ async function activateToneProfile(profileId) {
 
 async function rejectToneProfile(profileId) {
   if (!confirm('Reject this version? It stays in history but never becomes active.')) return;
-  await fetch('/api/clients/' + currentClientId + '/tone-profiles/' + profileId + '/reject', { method: 'POST' });
+  const reason = (prompt('Why? (optional, but this gets fed back into future proposals for this client)') || '').trim();
+  await fetch('/api/clients/' + currentClientId + '/tone-profiles/' + profileId + '/reject', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ reason }),
+  });
   loadToneProfiles();
 }
 
@@ -950,7 +970,11 @@ async function closeDeltaGap(activate) {
     status.textContent = 'Activated.';
   } else {
     if (!confirm('Reject this version? It stays in history but never becomes active.')) return;
-    await fetch('/api/clients/' + currentClientId + '/tone-profiles/' + currentDeltaProfileId + '/reject', { method: 'POST' });
+    const reason = (prompt('Why didn\'t this close the gap? (optional, but this gets fed back into future proposals for this client)') || '').trim();
+    await fetch('/api/clients/' + currentClientId + '/tone-profiles/' + currentDeltaProfileId + '/reject', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ reason }),
+    });
     loadToneProfiles();
     status.textContent = 'Rejected.';
   }

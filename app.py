@@ -209,6 +209,41 @@ def _merge_source_mix(parent_mix_json, added_mix):
     }
 
 
+def _merge_example_posts(existing_json, new_text, cap=3):
+    """Accumulate up to `cap` verbatim client-voice examples (Ben's ask,
+    2026-09-08: raw examples are higher signal than the scored category
+    breakdown). Keeps the MOST RECENT `cap` entries -- newer client edits are
+    presumably still-current voice, so a full list drops the oldest first."""
+    try:
+        existing = json.loads(existing_json) if existing_json else []
+    except (TypeError, ValueError):
+        existing = []
+    if not isinstance(existing, list):
+        existing = []
+    text = (new_text or '').strip()
+    if text and text not in existing:
+        existing.append(text)
+    return json.dumps(existing[-cap:], ensure_ascii=False)
+
+
+def _compute_target_length(example_posts_json):
+    """Word-count stats derived from example_posts -- Ben's ask, 2026-09-08:
+    Hemingway has been running long compared to real client output, and
+    length is cheap, concrete signal the category system doesn't capture."""
+    try:
+        posts = json.loads(example_posts_json) if example_posts_json else []
+    except (TypeError, ValueError):
+        posts = []
+    counts = [len(p.split()) for p in posts if isinstance(p, str) and p.strip()]
+    if not counts:
+        return '{}'
+    return json.dumps({
+        'avg_words': sum(counts) // len(counts),
+        'min_words': min(counts),
+        'max_words': max(counts),
+    })
+
+
 @app.route('/api/clients/<int:client_id>/tone-profiles', methods=['GET'])
 @require_auth
 def list_tone_profiles(client_id):
@@ -219,14 +254,16 @@ def list_tone_profiles(client_id):
     if context:
         rows = db.execute(
             'SELECT id, client_id, context, version, source_type, profile_json, change_summary, '
-            'parent_version, status, is_active, source_mix, created_at '
+            'parent_version, status, is_active, source_mix, created_at, example_posts, target_length, '
+            'rejection_reason '
             'FROM tone_profiles WHERE client_id = ? AND context = ? ORDER BY version DESC',
             (client_id, context)
         ).fetchall()
     else:
         rows = db.execute(
             'SELECT id, client_id, context, version, source_type, profile_json, change_summary, '
-            'parent_version, status, is_active, source_mix, created_at '
+            'parent_version, status, is_active, source_mix, created_at, example_posts, target_length, '
+            'rejection_reason '
             'FROM tone_profiles WHERE client_id = ? ORDER BY context, version DESC',
             (client_id,)
         ).fetchall()
@@ -360,7 +397,17 @@ def activate_tone_profile(client_id, profile_id):
 @app.route('/api/clients/<int:client_id>/tone-profiles/<int:profile_id>/reject', methods=['POST'])
 @require_auth
 def reject_tone_profile(client_id, profile_id):
-    """Mark a pending profile as rejected. Kept in history but never active."""
+    """Mark a pending profile as rejected. Kept in history but never active.
+
+    Ben's ask, 2026-09-08: accept an optional free-text reason for the
+    rejection. This is much higher-signal than the auto-inferred
+    rejection_list -- it's Ben's own judgment about why the proposal missed,
+    not Claude's guess -- and gets fed back into future Delta Analyzer runs
+    for this client/context (see build_delta_analysis_prompt's
+    rejected_context param) so the model doesn't repeat the same mistake."""
+    data = request.get_json(silent=True) or {}
+    reason = (data.get('reason') or '').strip()
+
     db = get_db()
     row = db.execute(
         'SELECT id, is_active FROM tone_profiles WHERE id = ? AND client_id = ?',
@@ -370,7 +417,10 @@ def reject_tone_profile(client_id, profile_id):
         return jsonify({'error': {'message': 'Profile not found for this client.'}}), 404
     if row['is_active']:
         return jsonify({'error': {'message': 'This profile is currently active; activate a different version before rejecting.'}}), 400
-    db.execute("UPDATE tone_profiles SET status = 'rejected' WHERE id = ?", (profile_id,))
+    db.execute(
+        "UPDATE tone_profiles SET status = 'rejected', rejection_reason = ? WHERE id = ?",
+        (reason, profile_id)
+    )
     db.commit()
     return jsonify({'ok': True})
 
@@ -418,8 +468,21 @@ def run_delta_analyzer(client_id):
     if not active:
         return jsonify({'error': {'message': f'No active Tone Profile for context "{context}" yet -- generate and activate one first (Phase 1) before running the Delta Analyzer.'}}), 400
 
+    # Pull recent rejections for this client/context so the analysis prompt
+    # doesn't repeat a direction Ben already said no to (Ben's ask, 2026-09-08).
+    rejected_rows = db.execute(
+        "SELECT change_summary, rejection_reason FROM tone_profiles "
+        "WHERE client_id = ? AND context = ? AND status = 'rejected' "
+        "ORDER BY created_at DESC LIMIT 5",
+        (client_id, context)
+    ).fetchall()
+    rejected_context = [dict(r) for r in rejected_rows]
+
     # Step 1: analyze the diff, propose an updated profile.
-    system, user = build_delta_analysis_prompt(original_post, client_edit, active['profile_json'], context=context)
+    system, user = build_delta_analysis_prompt(
+        original_post, client_edit, active['profile_json'], context=context,
+        rejected_context=rejected_context,
+    )
     try:
         raw = call_anthropic(model='claude-sonnet-4-5', max_tokens=4000, system=system,
                              messages=[{'role': 'user', 'content': user}])
@@ -458,18 +521,30 @@ def run_delta_analyzer(client_id):
     source_text = f'ORIGINAL:\n{original_post}\n\n---CLIENT EDIT---\n{client_edit}'
     profile_json_str = json.dumps(updated_profile, ensure_ascii=False)
 
+    # example_posts/target_length (Ben's ask, 2026-09-08): the client's own
+    # edit is real, verbatim voice evidence -- accumulate it (capped at 3,
+    # most recent) as a raw exemplar alongside the scored profile, and derive
+    # a length target from it since Hemingway has been running long.
+    example_posts_json = _merge_example_posts(active['example_posts'], client_edit)
+    target_length_json = _compute_target_length(example_posts_json)
+
     cur = db.execute(
         'INSERT INTO tone_profiles (client_id, context, version, source_type, source_text, '
-        'profile_json, rejection_list, source_mix, change_summary, parent_version, status, is_active) '
-        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        'profile_json, rejection_list, source_mix, change_summary, parent_version, status, is_active, '
+        'example_posts, target_length) '
+        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
         (client_id, context, next_version, 'delta', source_text, profile_json_str,
-         json.dumps(merged_rejections), json.dumps(source_mix), diff_analysis, active['version'], 'pending', 0)
+         json.dumps(merged_rejections), json.dumps(source_mix), diff_analysis, active['version'], 'pending', 0,
+         example_posts_json, target_length_json)
     )
     db.commit()
     new_profile_id = cur.lastrowid
 
     # Step 2: attempt to regenerate the same topic using the proposed profile.
-    regen_system = build_system_prompt('conversational', client_rules='', active_tone_profile=updated_profile)
+    regen_system = build_system_prompt(
+        'conversational', client_rules='', active_tone_profile=updated_profile,
+        example_posts=json.loads(example_posts_json), target_length=json.loads(target_length_json),
+    )
     regen_user = build_delta_regenerate_user_prompt(original_post)
     try:
         regenerated_attempt = call_anthropic(model='claude-sonnet-4-5', max_tokens=1200,
@@ -513,7 +588,19 @@ def regenerate_delta_again(client_id, delta_id):
     except (TypeError, ValueError):
         return jsonify({'error': {'message': 'Stored profile JSON is corrupt.'}}), 500
 
-    regen_system = build_system_prompt('conversational', client_rules='', active_tone_profile=updated_profile)
+    try:
+        example_posts = json.loads(profile_row['example_posts'] or '[]')
+    except (TypeError, ValueError):
+        example_posts = []
+    try:
+        target_length = json.loads(profile_row['target_length'] or '{}')
+    except (TypeError, ValueError):
+        target_length = {}
+
+    regen_system = build_system_prompt(
+        'conversational', client_rules='', active_tone_profile=updated_profile,
+        example_posts=example_posts, target_length=target_length,
+    )
     regen_user = build_delta_regenerate_user_prompt(delta['original_post'])
     try:
         regenerated_attempt = call_anthropic(model='claude-sonnet-4-5', max_tokens=1200,
@@ -676,7 +763,31 @@ def get_active_tone_profile(client_id, context='default'):
         return None
 
 
-def review_and_revise_post(draft, style, client_rules, style_docs_text, global_style=None, active_tone_profile=None):
+def get_active_tone_extras(client_id, context='default'):
+    """Companion to get_active_tone_profile() -- fetches the same active
+    row's example_posts/target_length (Ben's ask, 2026-09-08). Kept separate
+    rather than folded into get_active_tone_profile() so that function's
+    existing return shape (just the parsed profile dict) doesn't change for
+    its other callers/tests. Same before-stream()/g.db caveat applies."""
+    db = get_db()
+    row = db.execute(
+        'SELECT example_posts, target_length FROM tone_profiles WHERE client_id = ? AND context = ? AND is_active = 1',
+        (client_id, context or 'default')
+    ).fetchone()
+    if not row:
+        return [], {}
+    try:
+        example_posts = json.loads(row['example_posts'] or '[]')
+    except (TypeError, ValueError):
+        example_posts = []
+    try:
+        target_length = json.loads(row['target_length'] or '{}')
+    except (TypeError, ValueError):
+        target_length = {}
+    return example_posts, target_length
+
+
+def review_and_revise_post(draft, style, client_rules, style_docs_text, global_style=None, active_tone_profile=None, example_posts=None, target_length=None):
     """Second pass: an independent editor call that checks the first pass's
     output against the same style/voice standards it was supposed to follow,
     and fixes anything that slipped through. Best-effort — if this call fails
@@ -694,6 +805,8 @@ def review_and_revise_post(draft, style, client_rules, style_docs_text, global_s
         global_style_doc=global_style.get('global_style_doc'),
         base_rules=global_style.get('base_rules'),
         active_tone_profile=active_tone_profile,
+        example_posts=example_posts,
+        target_length=target_length,
     )
     user = build_review_user_prompt(draft, style_docs_text)
     revised = call_anthropic(
@@ -705,13 +818,15 @@ def review_and_revise_post(draft, style, client_rules, style_docs_text, global_s
     return revised.strip() or draft
 
 
-def write_post_for_section(title, section_body, full_corpus, style, length, client_rules, style_docs_text, batch_context, global_style=None, active_tone_profile=None):
+def write_post_for_section(title, section_body, full_corpus, style, length, client_rules, style_docs_text, batch_context, global_style=None, active_tone_profile=None, example_posts=None, target_length=None):
     global_style = global_style or {}
     system = build_system_prompt(
         style, client_rules,
         global_style_doc=global_style.get('global_style_doc'),
         base_rules=global_style.get('base_rules'),
         active_tone_profile=active_tone_profile,
+        example_posts=example_posts,
+        target_length=target_length,
     )
     # Phase 2: when a Tone Profile is active it fully replaces the manual
     # style_rules/reference-copy layer, so DON'T include either of those in
@@ -728,7 +843,7 @@ def write_post_for_section(title, section_body, full_corpus, style, length, clie
         messages=[{'role': 'user', 'content': user}]
     )
     try:
-        return review_and_revise_post(draft, style, client_rules, style_docs_text, global_style, active_tone_profile=active_tone_profile)
+        return review_and_revise_post(draft, style, client_rules, style_docs_text, global_style, active_tone_profile=active_tone_profile, example_posts=example_posts, target_length=target_length)
     except Exception:
         # Style QA pass is best-effort -- a working, unreviewed post beats no post.
         return draft
@@ -785,6 +900,7 @@ def generate():
     # Same reason as global_style: must fetch BEFORE stream() -- get_db()/g.db
     # is gone once Flask hands off the streaming response.
     active_tone_profile = get_active_tone_profile(client_id, tone_context)
+    example_posts, target_length = get_active_tone_extras(client_id, tone_context)
 
     # Cap the voice-context corpus at 10 sections to control token costs on large batches.
     # The model only needs a sample to learn the speaker's voice — all 40+ sections is wasteful.
@@ -816,6 +932,8 @@ def generate():
                         style, length, client_rules,
                         style_docs_text, context, global_style,
                         active_tone_profile=active_tone_profile,
+                        example_posts=example_posts,
+                        target_length=target_length,
                     )
                     post_cursor = conn.execute(
                         'INSERT INTO posts (batch_id, title, body, section_body) VALUES (?, ?, ?, ?)',
@@ -860,11 +978,14 @@ def rewrite_post(post_id):
         client_rules += f'\n\nFor this specific rewrite, also follow this instruction: {extra}'
 
     try:
+        _rewrite_example_posts, _rewrite_target_length = get_active_tone_extras(client['id'])
         new_body = write_post_for_section(
             post['title'], post['section_body'], batch['transcript_raw'],
             batch['style'], batch['length'], client_rules,
             style_docs_text, batch['context'], get_global_style(),
             active_tone_profile=get_active_tone_profile(client['id']),
+            example_posts=_rewrite_example_posts,
+            target_length=_rewrite_target_length,
         )
         db.execute('UPDATE posts SET body = ? WHERE id = ?', (new_body, post_id))
         db.commit()
@@ -900,12 +1021,15 @@ def rewrite_paragraph(post_id):
     target = paragraphs[paragraph_index]
     global_style = get_global_style()
     active_tone_profile = get_active_tone_profile(client['id'])
+    example_posts, target_length = get_active_tone_extras(client['id'])
     system = (
         build_system_prompt(
             batch['style'], client['style_rules'],
             global_style_doc=global_style['global_style_doc'],
             base_rules=global_style['base_rules'],
             active_tone_profile=active_tone_profile,
+            example_posts=example_posts,
+            target_length=target_length,
         ) +
         '\n\nYou are revising ONE paragraph of an existing LinkedIn post. Keep it consistent '
         'with the rest of the post in tone and voice. Output ONLY the rewritten paragraph text, nothing else.'

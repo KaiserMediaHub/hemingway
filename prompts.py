@@ -95,10 +95,20 @@ DEFAULT_BASE_RULES = '''Rules you never break:
 - Every sentence should either advance the idea, deepen it, or land it. Nothing else.'''
 
 
-def render_tone_profile_for_prompt(profile_dict):
+def render_tone_profile_for_prompt(profile_dict, example_posts=None, target_length=None):
     """Turn a stored Tone Profile JSON dict into a prompt-ready instruction
     block. Called by build_system_prompt/build_review_system_prompt when a
     client has an active profile (Phase 2, Ben's ask 2026-08-27).
+
+    example_posts / target_length (Ben's ask, 2026-09-08): the scored
+    category breakdown below is a LOSSY abstraction of a voice -- adjectives
+    describing a voice are weaker than the voice itself. example_posts is a
+    list of up to 3 verbatim real posts/client-edits, rendered directly so
+    the model can imitate the literal voice, not just a description of it.
+    target_length is {"avg_words", "min_words", "max_words"} computed from
+    those same examples -- added because Hemingway has been running long
+    compared to real client output, and length is cheap, high-leverage
+    signal that the category system doesn't capture at all.
 
     Filtering rules -- kept explicit so it's easy to see why a rendered
     profile is short:
@@ -113,6 +123,28 @@ def render_tone_profile_for_prompt(profile_dict):
         return ''
 
     parts = ['ACTIVE TONE PROFILE — this replaces any generic style preset for this client. Follow it exactly.\n']
+
+    if target_length and isinstance(target_length, dict) and target_length.get('avg_words'):
+        avg = target_length.get('avg_words')
+        lo = target_length.get('min_words', avg)
+        hi = target_length.get('max_words', avg)
+        parts.append(
+            f'TARGET LENGTH: aim for approximately {avg} words. This client\'s own real posts run '
+            f'{lo}-{hi} words. Hemingway has a documented tendency to run long compared to real client '
+            f'output -- when in doubt, cut, don\'t pad. Do not exceed the high end of this range by more '
+            f'than ~15%.\n'
+        )
+
+    if example_posts and isinstance(example_posts, list):
+        cleaned_examples = [e for e in example_posts if isinstance(e, str) and e.strip()][:3]
+        if cleaned_examples:
+            parts.append(
+                'REAL EXAMPLES OF THIS CLIENT\'S OWN VOICE — study these directly. They are higher '
+                'signal than the category breakdown below; if the two ever conflict, follow these '
+                'examples:\n'
+            )
+            for i, ex in enumerate(cleaned_examples, 1):
+                parts.append(f'--- Example {i} ---\n{ex.strip()}\n--- end example {i} ---\n')
 
     summary = (profile_dict.get('summary') or '').strip()
     if summary:
@@ -164,7 +196,7 @@ def render_tone_profile_for_prompt(profile_dict):
     return '\n'.join(parts) + '\n\n'
 
 
-def build_system_prompt(style, client_rules, global_style_doc=None, base_rules=None, active_tone_profile=None):
+def build_system_prompt(style, client_rules, global_style_doc=None, base_rules=None, active_tone_profile=None, example_posts=None, target_length=None):
     # A client with a real voice guide on file (style_rules and/or reference
     # copy) should be governed by that guide alone, not a generic preset
     # running in parallel. Found in production 2026-08-20: the "punchy" preset
@@ -191,7 +223,7 @@ def build_system_prompt(style, client_rules, global_style_doc=None, base_rules=N
     # code path is preserved verbatim for clients with no active profile.
     profile_block = ''
     if active_tone_profile:
-        profile_block = render_tone_profile_for_prompt(active_tone_profile)
+        profile_block = render_tone_profile_for_prompt(active_tone_profile, example_posts=example_posts, target_length=target_length)
     has_active_profile = bool(profile_block)
     has_custom_voice = bool(client_rules and client_rules.strip())
 
@@ -279,7 +311,7 @@ def build_user_prompt(title, section_body, full_corpus, length, style_docs_text,
     return prompt
 
 
-def build_review_system_prompt(style, client_rules, global_style_doc=None, base_rules=None, active_tone_profile=None):
+def build_review_system_prompt(style, client_rules, global_style_doc=None, base_rules=None, active_tone_profile=None, example_posts=None, target_length=None):
     # Same precedence fix as build_system_prompt above -- the review pass has
     # to defer to the client's voice guide the same way the draft pass does,
     # or it will "correct" a draft back into violating the client's own rules.
@@ -292,7 +324,7 @@ def build_review_system_prompt(style, client_rules, global_style_doc=None, base_
 
     profile_block = ''
     if active_tone_profile:
-        profile_block = render_tone_profile_for_prompt(active_tone_profile)
+        profile_block = render_tone_profile_for_prompt(active_tone_profile, example_posts=example_posts, target_length=target_length)
     has_active_profile = bool(profile_block)
     has_custom_voice = bool(client_rules and client_rules.strip())
 
@@ -486,14 +518,39 @@ def build_tone_profile_change_summary_prompt(old_profile_json, new_profile_json)
 #      charitable to itself).
 # ---------------------------------------------------------------------------
 
-def build_delta_analysis_prompt(original_post, client_edit, current_profile_json, context='default'):
+def build_delta_analysis_prompt(original_post, client_edit, current_profile_json, context='default', rejected_context=None):
     categories_block = ', '.join(TONE_PROFILE_CATEGORIES)
+
+    rejected_block = ''
+    if rejected_context:
+        entries = []
+        for r in rejected_context:
+            reason = (r.get('rejection_reason') or '').strip()
+            summary = (r.get('change_summary') or '').strip()
+            if not reason and not summary:
+                continue
+            line = f'  - Proposed change: {summary or "(no summary recorded)"}'
+            if reason:
+                line += f'\n    Ben rejected it, reason given: "{reason}"'
+            else:
+                line += '\n    Ben rejected it (no reason given).'
+            entries.append(line)
+        if entries:
+            rejected_block = (
+                '\nPREVIOUSLY REJECTED PROFILE UPDATES for this client/context -- Ben looked at these '
+                'proposals before and said no. Do not repeat a rejected direction unless THIS edit gives '
+                'clear new evidence for it. Weight Ben\'s stated reasons heavily -- they are direct human '
+                'judgment about the client\'s actual voice, more reliable than inference from text alone:\n'
+                + '\n'.join(entries) + '\n'
+            )
+
     system = (
         'You are a voice analyst refining an existing Tone Profile using a real, high-signal example: '
         'a post that was written one way, and a client\'s own edit of it. The client\'s edit is ground '
         'truth about their actual voice -- more reliable than the original profile wherever they conflict.\n\n'
         'You will be given the CURRENT profile (JSON) plus the original post and the client\'s edited '
         'version. Produce an UPDATED profile in the EXACT SAME JSON shape as the current one:\n\n'
+        f'{rejected_block}'
         f'Required category keys (all of them, exact keys): {categories_block}\n\n'
         'Each category needs: "score" (0-100), "confidence" (0-100), "note" (one plain-language '
         'sentence), "supporting_quote" (a short quote backing the score, from EITHER the original '

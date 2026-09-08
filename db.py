@@ -122,6 +122,25 @@ def init_db():
     except Exception:
         pass  # column already exists
 
+    # Migration (Ben's ask, 2026-09-08): tone_profiles gains three columns --
+    # example_posts (verbatim client-voice specimens, not just scored
+    # abstraction), target_length (word-count stats derived from those
+    # examples, since Hemingway has been running long vs. real client posts),
+    # and rejection_reason (Ben's own stated reason when he rejects a
+    # delta-proposed version -- much higher signal than the auto-inferred
+    # rejection_list, which only captures Claude's guess at what the client's
+    # edit implies).
+    for col, ddl in [
+        ('example_posts', "ALTER TABLE tone_profiles ADD COLUMN example_posts TEXT DEFAULT '[]'"),
+        ('target_length', "ALTER TABLE tone_profiles ADD COLUMN target_length TEXT DEFAULT '{}'"),
+        ('rejection_reason', "ALTER TABLE tone_profiles ADD COLUMN rejection_reason TEXT DEFAULT ''"),
+    ]:
+        try:
+            conn.execute(ddl)
+            conn.commit()
+        except Exception:
+            pass  # column already exists
+
     # Seed global_style with the hardcoded defaults, once, if the table is
     # empty. Import happens here (not at module top) to avoid a circular
     # import, since prompts.py doesn't import db.py.
