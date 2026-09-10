@@ -95,7 +95,7 @@ DEFAULT_BASE_RULES = '''Rules you never break:
 - Every sentence should either advance the idea, deepen it, or land it. Nothing else.'''
 
 
-def render_tone_profile_for_prompt(profile_dict, example_posts=None, target_length=None):
+def render_tone_profile_for_prompt(profile_dict, example_posts=None, target_length=None, opener_context=None):
     """Turn a stored Tone Profile JSON dict into a prompt-ready instruction
     block. Called by build_system_prompt/build_review_system_prompt when a
     client has an active profile (Phase 2, Ben's ask 2026-08-27).
@@ -170,6 +170,20 @@ def render_tone_profile_for_prompt(profile_dict, example_posts=None, target_leng
         for item in voice_dont:
             parts.append(f'  - {item}')
 
+    opener_shapes = profile_dict.get('opener_shapes') or []
+    if opener_shapes:
+        parts.append(
+            '\nOPENER SHAPES (Ben\'s ask, 2026-09-09) — reusable STRUCTURES for how a post can open, '
+            'not fixed lines. Pick ONE shape per post and fill it in with the real facts/topic of THIS '
+            'post. Rotate across different shapes from post to post -- do not default to the same shape '
+            'every time. If recent-opener context appears below, do not repeat the same shape those used:'
+        )
+        for shape in opener_shapes:
+            parts.append(f'  - {shape}')
+
+    if opener_context:
+        parts.append(f'\n{opener_context}')
+
     strong_lines = []
     tendency_lines = []
     for cat in TONE_PROFILE_CATEGORIES:
@@ -204,7 +218,40 @@ def render_tone_profile_for_prompt(profile_dict, example_posts=None, target_leng
     return '\n'.join(parts) + '\n\n'
 
 
-def build_system_prompt(style, client_rules, global_style_doc=None, base_rules=None, active_tone_profile=None, example_posts=None, target_length=None):
+def render_opener_context(recent_openers=None, library_openers=None):
+    """Build the 'here's what's already been used' block (Ben's ask,
+    2026-09-09) -- fixes the root problem behind repetitive openers: each
+    generation call is otherwise stateless and has zero awareness of any
+    other post, including earlier posts in the SAME batch. recent_openers is
+    the actual opening lines of the last few real posts for this
+    client/context (plus, within one multi-section batch, whatever's already
+    been written earlier in that same batch); library_openers is the
+    manually-curated bank of confirmed-good Hey Orca openers (opener_library
+    table) -- real, human-approved structural examples, separate from the
+    anti-repetition list."""
+    parts = []
+    recent = [o.strip() for o in (recent_openers or []) if o and o.strip()]
+    if recent:
+        parts.append(
+            'RECENTLY USED OPENERS for this client -- do not repeat this structure, pick a '
+            'DIFFERENT opener shape than these:'
+        )
+        for o in recent:
+            parts.append(f'  - "{o}"')
+
+    library = [o.strip() for o in (library_openers or []) if o and o.strip()][:10]
+    if library:
+        parts.append(
+            '\nAPPROVED OPENERS this client has actually used and confirmed (study the STRUCTURE, '
+            'never copy the specific wording or topic -- these are from unrelated posts):'
+        )
+        for o in library:
+            parts.append(f'  - "{o}"')
+
+    return '\n'.join(parts) if parts else ''
+
+
+def build_system_prompt(style, client_rules, global_style_doc=None, base_rules=None, active_tone_profile=None, example_posts=None, target_length=None, recent_openers=None, library_openers=None):
     # A client with a real voice guide on file (style_rules and/or reference
     # copy) should be governed by that guide alone, not a generic preset
     # running in parallel. Found in production 2026-08-20: the "punchy" preset
@@ -231,7 +278,8 @@ def build_system_prompt(style, client_rules, global_style_doc=None, base_rules=N
     # code path is preserved verbatim for clients with no active profile.
     profile_block = ''
     if active_tone_profile:
-        profile_block = render_tone_profile_for_prompt(active_tone_profile, example_posts=example_posts, target_length=target_length)
+        opener_context = render_opener_context(recent_openers=recent_openers, library_openers=library_openers)
+        profile_block = render_tone_profile_for_prompt(active_tone_profile, example_posts=example_posts, target_length=target_length, opener_context=opener_context)
     has_active_profile = bool(profile_block)
     has_custom_voice = bool(client_rules and client_rules.strip())
 
@@ -319,7 +367,7 @@ def build_user_prompt(title, section_body, full_corpus, length, style_docs_text,
     return prompt
 
 
-def build_review_system_prompt(style, client_rules, global_style_doc=None, base_rules=None, active_tone_profile=None, example_posts=None, target_length=None):
+def build_review_system_prompt(style, client_rules, global_style_doc=None, base_rules=None, active_tone_profile=None, example_posts=None, target_length=None, recent_openers=None, library_openers=None):
     # Same precedence fix as build_system_prompt above -- the review pass has
     # to defer to the client's voice guide the same way the draft pass does,
     # or it will "correct" a draft back into violating the client's own rules.
@@ -332,7 +380,8 @@ def build_review_system_prompt(style, client_rules, global_style_doc=None, base_
 
     profile_block = ''
     if active_tone_profile:
-        profile_block = render_tone_profile_for_prompt(active_tone_profile, example_posts=example_posts, target_length=target_length)
+        opener_context = render_opener_context(recent_openers=recent_openers, library_openers=library_openers)
+        profile_block = render_tone_profile_for_prompt(active_tone_profile, example_posts=example_posts, target_length=target_length, opener_context=opener_context)
     has_active_profile = bool(profile_block)
     has_custom_voice = bool(client_rules and client_rules.strip())
 

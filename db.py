@@ -97,6 +97,23 @@ CREATE TABLE IF NOT EXISTS tone_deltas (
     FOREIGN KEY (client_id) REFERENCES clients(id) ON DELETE CASCADE
 );
 
+-- Opener library (Ben's ask, 2026-09-09): a freeform, manually-curated bank
+-- of REAL, human-approved opening lines per (client, context). Harris posts
+-- go out via Hey Orca, not Postiz, so Studio has no way to automatically
+-- detect when something actually got published -- this is deliberately a
+-- simple "paste it in when you know it's good" upload, not tied to any post
+-- record or publish-status pipeline. Rendered into generation prompts
+-- alongside the profile's opener_shapes so Hemingway has real structural
+-- variety to draw from, on top of the recent-post anti-repetition check.
+CREATE TABLE IF NOT EXISTS opener_library (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_id   INTEGER NOT NULL,
+    context     TEXT NOT NULL DEFAULT 'default',
+    opener_text TEXT NOT NULL,
+    created_at  TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (client_id) REFERENCES clients(id) ON DELETE CASCADE
+);
+
 -- Single-row table for the rules that apply to EVERY client (Ben's ask,
 -- 2026-08-24: "is there a spot where I can edit the global style? Things
 -- that every client needs"). Previously these were hardcoded in prompts.py

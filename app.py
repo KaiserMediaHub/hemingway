@@ -647,6 +647,59 @@ def list_deltas(client_id):
     return jsonify([dict(r) for r in rows])
 
 
+# ---------- Opener Library (Ben's ask, 2026-09-09) ----------
+# Freeform, manually-curated bank of confirmed-good openers, decoupled from
+# any post record or publish status (Harris posts via Hey Orca, not Postiz,
+# so Studio has no automatic "this went live" signal). See db.py's
+# opener_library comment.
+
+@app.route('/api/clients/<int:client_id>/opener-library', methods=['GET'])
+@require_auth
+def list_opener_library(client_id):
+    context = request.args.get('context', 'default')
+    db = get_db()
+    rows = db.execute(
+        'SELECT id, client_id, context, opener_text, created_at FROM opener_library '
+        'WHERE client_id = ? AND context = ? ORDER BY created_at DESC',
+        (client_id, context)
+    ).fetchall()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route('/api/clients/<int:client_id>/opener-library', methods=['POST'])
+@require_auth
+def add_opener_library_entry(client_id):
+    data = request.get_json() or {}
+    opener_text = (data.get('opener_text') or '').strip()
+    context = (data.get('context') or 'default').strip() or 'default'
+    if len(opener_text) < 5:
+        return jsonify({'error': {'message': 'Opener text is too short.'}}), 400
+    db = get_db()
+    if not db.execute('SELECT id FROM clients WHERE id = ?', (client_id,)).fetchone():
+        return jsonify({'error': {'message': 'Client not found.'}}), 404
+    cur = db.execute(
+        'INSERT INTO opener_library (client_id, context, opener_text) VALUES (?, ?, ?)',
+        (client_id, context, opener_text)
+    )
+    db.commit()
+    row = db.execute('SELECT * FROM opener_library WHERE id = ?', (cur.lastrowid,)).fetchone()
+    return jsonify(dict(row))
+
+
+@app.route('/api/clients/<int:client_id>/opener-library/<int:entry_id>', methods=['DELETE'])
+@require_auth
+def delete_opener_library_entry(client_id, entry_id):
+    db = get_db()
+    row = db.execute(
+        'SELECT id FROM opener_library WHERE id = ? AND client_id = ?', (entry_id, client_id)
+    ).fetchone()
+    if not row:
+        return jsonify({'error': {'message': 'Entry not found for this client.'}}), 404
+    db.execute('DELETE FROM opener_library WHERE id = ?', (entry_id,))
+    db.commit()
+    return jsonify({'ok': True})
+
+
 # ---------- Style Docs ----------
 
 @app.route('/api/clients/<int:client_id>/style-docs', methods=['GET'])
@@ -779,6 +832,50 @@ def get_active_tone_profile(client_id, context='default'):
         return None
 
 
+def _extract_opening_line(text):
+    """Grab just the opening sentence/line of a post body -- used both to
+    record what a post opened with (for the anti-repetition check) and when
+    rendering opener_library entries. Simple heuristic: first line, or up to
+    the first sentence-ending punctuation if the first line is long."""
+    if not text:
+        return ''
+    first_line = text.strip().split('\n')[0].strip()
+    for punct in ('. ', '! ', '? '):
+        idx = first_line.find(punct)
+        if 0 < idx < 200:
+            return first_line[:idx + 1].strip()
+    return first_line[:200].strip()
+
+
+def get_recent_openers(client_id, context='default', limit=3):
+    """Last N real posts' opening lines for this client/context (Ben's ask,
+    2026-09-09). Each generation call is otherwise stateless -- it has no
+    memory of any other post, including ones written minutes ago -- so
+    without this, nothing stops the model from reusing the same opener
+    structure every time. Looked up against Hemingway's own posts table via
+    the batches this client owns (posts have no direct client_id column)."""
+    db = get_db()
+    rows = db.execute(
+        'SELECT p.body FROM posts p JOIN batches b ON p.batch_id = b.id '
+        'WHERE b.client_id = ? ORDER BY p.created_at DESC LIMIT ?',
+        (client_id, limit)
+    ).fetchall()
+    return [_extract_opening_line(r['body']) for r in rows if r['body']]
+
+
+def get_opener_library(client_id, context='default', limit=10):
+    """Manually-curated bank of confirmed-good openers (Ben's ask,
+    2026-09-09) -- see db.py's opener_library comment for why this is a
+    freeform paste rather than tied to any post/publish status."""
+    db = get_db()
+    rows = db.execute(
+        'SELECT opener_text FROM opener_library WHERE client_id = ? AND context = ? '
+        'ORDER BY created_at DESC LIMIT ?',
+        (client_id, context or 'default', limit)
+    ).fetchall()
+    return [r['opener_text'] for r in rows]
+
+
 def get_active_tone_extras(client_id, context='default'):
     """Companion to get_active_tone_profile() -- fetches the same active
     row's example_posts/target_length (Ben's ask, 2026-09-08). Kept separate
@@ -803,7 +900,7 @@ def get_active_tone_extras(client_id, context='default'):
     return example_posts, target_length
 
 
-def review_and_revise_post(draft, style, client_rules, style_docs_text, global_style=None, active_tone_profile=None, example_posts=None, target_length=None):
+def review_and_revise_post(draft, style, client_rules, style_docs_text, global_style=None, active_tone_profile=None, example_posts=None, target_length=None, recent_openers=None, library_openers=None):
     """Second pass: an independent editor call that checks the first pass's
     output against the same style/voice standards it was supposed to follow,
     and fixes anything that slipped through. Best-effort — if this call fails
@@ -823,6 +920,8 @@ def review_and_revise_post(draft, style, client_rules, style_docs_text, global_s
         active_tone_profile=active_tone_profile,
         example_posts=example_posts,
         target_length=target_length,
+        recent_openers=recent_openers,
+        library_openers=library_openers,
     )
     user = build_review_user_prompt(draft, style_docs_text)
     revised = call_anthropic(
@@ -834,7 +933,7 @@ def review_and_revise_post(draft, style, client_rules, style_docs_text, global_s
     return revised.strip() or draft
 
 
-def write_post_for_section(title, section_body, full_corpus, style, length, client_rules, style_docs_text, batch_context, global_style=None, active_tone_profile=None, example_posts=None, target_length=None):
+def write_post_for_section(title, section_body, full_corpus, style, length, client_rules, style_docs_text, batch_context, global_style=None, active_tone_profile=None, example_posts=None, target_length=None, recent_openers=None, library_openers=None):
     global_style = global_style or {}
     system = build_system_prompt(
         style, client_rules,
@@ -843,6 +942,8 @@ def write_post_for_section(title, section_body, full_corpus, style, length, clie
         active_tone_profile=active_tone_profile,
         example_posts=example_posts,
         target_length=target_length,
+        recent_openers=recent_openers,
+        library_openers=library_openers,
     )
     # Phase 2: when a Tone Profile is active it fully replaces the manual
     # style_rules/reference-copy layer, so DON'T include either of those in
@@ -859,7 +960,7 @@ def write_post_for_section(title, section_body, full_corpus, style, length, clie
         messages=[{'role': 'user', 'content': user}]
     )
     try:
-        return review_and_revise_post(draft, style, client_rules, style_docs_text, global_style, active_tone_profile=active_tone_profile, example_posts=example_posts, target_length=target_length)
+        return review_and_revise_post(draft, style, client_rules, style_docs_text, global_style, active_tone_profile=active_tone_profile, example_posts=example_posts, target_length=target_length, recent_openers=recent_openers, library_openers=library_openers)
     except Exception:
         # Style QA pass is best-effort -- a working, unreviewed post beats no post.
         return draft
@@ -917,6 +1018,14 @@ def generate():
     # is gone once Flask hands off the streaming response.
     active_tone_profile = get_active_tone_profile(client_id, tone_context)
     example_posts, target_length = get_active_tone_extras(client_id, tone_context)
+    # Ben's ask 2026-09-09: opener rotation. recent_openers seeds the batch
+    # with what was ALREADY used in real prior posts; batch_openers (below,
+    # inside stream()) then grows as this batch itself writes posts, so post
+    # 5 of 8 in one run knows what posts 1-4 in the SAME run just opened
+    # with -- otherwise every post in a batch is blind to every other post
+    # in that same batch, which is the main reason openers kept repeating.
+    recent_openers = get_recent_openers(client_id, tone_context)
+    library_openers = get_opener_library(client_id, tone_context)
 
     # Cap the voice-context corpus at 10 sections to control token costs on large batches.
     # The model only needs a sample to learn the speaker's voice — all 40+ sections is wasteful.
@@ -939,6 +1048,7 @@ def generate():
         # streaming response, before this generator finishes.
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
+        batch_openers = []  # opening lines of posts already written IN THIS batch
         try:
             yield json.dumps({'type': 'start', 'batchId': batch_id, 'total': len(sections)}) + '\n'
             for i, sec in enumerate(sections):
@@ -950,7 +1060,10 @@ def generate():
                         active_tone_profile=active_tone_profile,
                         example_posts=example_posts,
                         target_length=target_length,
+                        recent_openers=recent_openers + batch_openers,
+                        library_openers=library_openers,
                     )
+                    batch_openers.append(_extract_opening_line(post))
                     post_cursor = conn.execute(
                         'INSERT INTO posts (batch_id, title, body, section_body) VALUES (?, ?, ?, ?)',
                         (batch_id, sec['title'], post, sec['body'])
@@ -1002,6 +1115,8 @@ def rewrite_post(post_id):
             active_tone_profile=get_active_tone_profile(client['id']),
             example_posts=_rewrite_example_posts,
             target_length=_rewrite_target_length,
+            recent_openers=get_recent_openers(client['id']),
+            library_openers=get_opener_library(client['id']),
         )
         db.execute('UPDATE posts SET body = ? WHERE id = ?', (new_body, post_id))
         db.commit()

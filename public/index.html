@@ -391,6 +391,19 @@
             </div>
           </div>
 
+          <!-- ===== Opener Library (Ben's ask, 2026-09-09) ===== -->
+          <div class="card">
+            <div class="card-title">Opener Library</div>
+            <div class="card-sub">Harris posts go out via Hey Orca, not Postiz, so Studio has no automatic way to know what actually got published. Paste in the opening line once you know a post is good -- Hemingway studies the STRUCTURE of these (never the specific wording) alongside the reusable opener shapes in the Tone Profile, on top of checking recent posts so it doesn't repeat itself.</div>
+            <textarea id="openerLibraryInput" rows="2" placeholder="Paste the confirmed, published opening line here..."></textarea>
+            <button class="btn" style="margin-top:10px;" onclick="addOpenerLibraryEntry()">Add to library</button>
+            <span class="status" id="openerLibraryStatus" style="display:inline-flex; margin-left:10px;"></span>
+            <div style="margin-top:16px;">
+              <div style="font-size:12px;font-weight:600;color:var(--ink-mid);margin-bottom:8px;">Banked openers</div>
+              <div id="openerLibraryList"><div style="font-size:12px;color:var(--ink-light);">Loading...</div></div>
+            </div>
+          </div>
+
           <div class="card">
             <div class="card-title">Style rules</div>
             <div class="card-sub">Plain-language do's and don'ts for this client, one per line. Example: "Don't use the phrase 'last forty years'." These are injected into every post written for this client.</div>
@@ -742,6 +755,7 @@ async function loadToneProfiles() {
     deltaRunBtn.disabled = !active;
   }
   loadDeltaHistory();
+  loadOpenerLibrary();
 
   // Version list
   const list = document.getElementById('tpVersionList');
@@ -1026,6 +1040,71 @@ async function loadDeltaHistory() {
   } catch (e) {
     list.innerHTML = '<div style="font-size:12px;color:var(--red);">Failed to load history.</div>';
   }
+}
+
+// ---------- Opener Library (Ben's ask, 2026-09-09) ----------
+async function loadOpenerLibrary() {
+  if (!currentClientId) return;
+  const ctx = document.getElementById('tpContext').value;
+  const list = document.getElementById('openerLibraryList');
+  if (!list) return;
+  list.innerHTML = '<div style="font-size:12px;color:var(--ink-light);">Loading...</div>';
+  try {
+    const res = await fetch('/api/clients/' + currentClientId + '/opener-library?context=' + encodeURIComponent(ctx));
+    const entries = await res.json();
+    if (!entries.length) {
+      list.innerHTML = '<div style="font-size:12px;color:var(--ink-light);">No openers banked yet for this context.</div>';
+      return;
+    }
+    list.innerHTML = '';
+    entries.forEach(e => {
+      const item = document.createElement('div');
+      item.className = 'doc-item';
+      item.innerHTML = '<span class="doc-name">' + escapeHtml(e.opener_text) + '</span>'
+        + '<span class="doc-del" onclick="deleteOpenerLibraryEntry(' + e.id + ')">&times;</span>';
+      list.appendChild(item);
+    });
+  } catch (e) {
+    list.innerHTML = '<div style="font-size:12px;color:var(--red);">Failed to load opener library.</div>';
+  }
+}
+
+async function addOpenerLibraryEntry() {
+  if (!currentClientId) return;
+  const ctx = document.getElementById('tpContext').value;
+  const input = document.getElementById('openerLibraryInput');
+  const status = document.getElementById('openerLibraryStatus');
+  const text = input.value.trim();
+  if (text.length < 5) {
+    status.textContent = 'Too short.';
+    status.style.color = 'var(--red)';
+    return;
+  }
+  status.textContent = 'Saving...';
+  status.style.color = '';
+  try {
+    const res = await fetch('/api/clients/' + currentClientId + '/opener-library', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ opener_text: text, context: ctx }),
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error && err.error.message || 'Failed to save.');
+    }
+    input.value = '';
+    status.textContent = 'Added.';
+    loadOpenerLibrary();
+  } catch (e) {
+    status.textContent = e.message;
+    status.style.color = 'var(--red)';
+  }
+}
+
+async function deleteOpenerLibraryEntry(id) {
+  if (!currentClientId) return;
+  if (!confirm('Remove this opener from the library?')) return;
+  await fetch('/api/clients/' + currentClientId + '/opener-library/' + id, { method: 'DELETE' });
+  loadOpenerLibrary();
 }
 
 // ---------- Style docs ----------
