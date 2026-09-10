@@ -68,8 +68,20 @@ PROFILE_WITH_SHAPES = {
     "opener_shapes": [
         "On this [job type], we [specific action].",
         "There's a reason [detail] never shows up in photos.",
+        "This started as [small thing] and turned into [bigger thing].",
     ],
     "directness": {"score": 90, "confidence": 85, "note": "States claims without hedging.", "supporting_quote": "We shipped it."},
+}
+
+# A larger shape set for testing the candidate-window rotation logic in
+# generate() -- needs more shapes than the candidate window size (3) so two
+# posts' windows can be proven disjoint. Synthetic labels (not real Harris
+# copy) keep the assertions unambiguous.
+PROFILE_WITH_MANY_SHAPES = {
+    "summary": "Warm, direct, unhedged first-person voice.",
+    "voice_do": ["state claims without hedging"],
+    "voice_dont": ["use corporate jargon"],
+    "opener_shapes": [f"Synthetic opener shape {i}." for i in range(6)],
 }
 
 
@@ -146,44 +158,78 @@ def test_opener_context_absent_when_no_active_profile():
     assert 'RECENTLY USED OPENERS' not in system
 
 
-# --- Forced opener-shape assignment (Ben's ask, 2026-09-10) ---
-# Production feedback: the original "pick one shape, rotate" instruction was
-# too soft -- across a real 10-post Harris batch, the model used only 2
-# distinct intros, and one of them ("Here we are...") wasn't even one of the
-# 25 shapes. Fix: the caller now deterministically assigns exactly one shape
-# per post rather than leaving the choice to the model.
+# --- Opener-shape candidate menus (Ben's ask, 2026-09-10, two rounds) ---
+# Round 1 production feedback: the original "pick one shape, rotate"
+# instruction was too soft -- across a real 10-post Harris batch, the model
+# used only 2 distinct intros, one of which ("Here we are...") wasn't even
+# one of the 25 shapes. Fix #1 was to force exactly ONE shape per post.
+#
+# Round 2 production feedback (same day): forcing exactly one shape backfired
+# -- it produced grammatically fine but topically nonsensical posts (a Gulf
+# Coast humidity/conditions shape forced onto a post about a kitchen layout).
+# Fix #2: offer a small ROTATING MENU of 2-3 candidate shapes per post and
+# let the model pick whichever genuinely fits -- narrow enough to force real
+# variety across a batch, wide enough for topical judgment.
 
-def test_assigned_shape_renders_forced_instruction_not_full_list():
+def test_multi_candidate_menu_renders_choose_one_instruction_not_full_list():
     from prompts import build_system_prompt
     system = build_system_prompt(
         'conversational', client_rules='', active_tone_profile=PROFILE_WITH_SHAPES,
-        assigned_opener_shape="On this [job type], we [specific action].",
+        opener_shape_candidates=[
+            "On this [job type], we [specific action].",
+            "There's a reason [detail] never shows up in photos.",
+        ],
+    )
+    assert 'OPENER SHAPE OPTIONS FOR THIS POST' in system
+    assert 'On this [job type], we [specific action].' in system
+    assert "There's a reason [detail] never shows up in photos." in system
+    # The third shape in the profile, NOT included in the candidate menu,
+    # must not leak into the prompt -- menu should be exactly what was passed.
+    assert "This started as [small thing] and turned into [bigger thing]." not in system
+    # Singular forced-instruction wording must not also appear (note: this is
+    # a real substring check -- "OPENER SHAPE FOR THIS POST" is NOT a
+    # substring of "OPENER SHAPE OPTIONS FOR THIS POST", so this is a
+    # meaningful assertion, not a false negative from the menu header itself).
+    assert 'OPENER SHAPE FOR THIS POST' not in system
+
+
+def test_single_candidate_forces_it_outright():
+    """Edge case: exactly one candidate (e.g. a profile with only one shape
+    total) -- nothing to choose between, so keep the old hard-forced wording
+    instead of a pointless one-item 'menu'."""
+    from prompts import build_system_prompt
+    system = build_system_prompt(
+        'conversational', client_rules='', active_tone_profile=PROFILE_WITH_SHAPES,
+        opener_shape_candidates=["On this [job type], we [specific action]."],
     )
     assert 'OPENER SHAPE FOR THIS POST' in system
+    assert 'OPENER SHAPE OPTIONS FOR THIS POST' not in system
     assert 'On this [job type], we [specific action].' in system
-    # The other shape from the profile must NOT be dumped into the prompt --
-    # forced-assignment mode shows only the one assigned shape, not the menu.
     assert "There's a reason [detail] never shows up in photos." not in system
 
 
-def test_no_assigned_shape_falls_back_to_full_list_and_soft_instruction():
-    """Regression guard: single-post callers that don't pass
-    assigned_opener_shape (or profiles with no opener_shapes at all) keep the
-    old list-plus-soft-rotate rendering unchanged."""
+def test_no_candidates_falls_back_to_full_list_and_soft_instruction():
+    """Regression guard: callers that don't pass opener_shape_candidates (or
+    profiles with no opener_shapes at all) keep the old list-plus-soft-rotate
+    rendering unchanged."""
     from prompts import build_system_prompt
     system = build_system_prompt(
         'conversational', client_rules='', active_tone_profile=PROFILE_WITH_SHAPES,
-        assigned_opener_shape=None,
+        opener_shape_candidates=None,
     )
     assert 'OPENER SHAPES (Ben\'s ask, 2026-09-09)' in system
     assert 'OPENER SHAPE FOR THIS POST' not in system
+    assert 'OPENER SHAPE OPTIONS FOR THIS POST' not in system
     assert 'On this [job type], we [specific action].' in system
     assert "There's a reason [detail] never shows up in photos." in system
+    assert "This started as [small thing] and turned into [bigger thing]." in system
 
 
-def test_generate_route_assigns_different_shape_to_each_post_in_batch():
-    """The actual production fix: with a 2-shape profile and a 2-post batch,
-    each post must get a DIFFERENT assigned shape -- not left to chance."""
+def test_generate_route_assigns_disjoint_candidate_windows_per_post():
+    """The actual production fix: with a 6-shape profile, a 3-shape candidate
+    window, and a 2-post batch, post 0 and post 1 must be offered completely
+    DIFFERENT (non-overlapping) sets of 3 candidates -- proves the sliding
+    window is actually advancing, not just re-offering the same menu."""
     db_path = os.path.join(tempfile.gettempdir(), "hemingway_test_opener_10.db")
     app_module = _fresh_app(db_path)
 
@@ -192,7 +238,7 @@ def test_generate_route_assigns_different_shape_to_each_post_in_batch():
     raw.execute(
         "INSERT INTO tone_profiles (client_id, context, version, source_type, source_text, "
         "profile_json, status, is_active) VALUES (1, 'default', 1, 'posts', 'x', ?, 'approved', 1)",
-        (json.dumps(PROFILE_WITH_SHAPES),)
+        (json.dumps(PROFILE_WITH_MANY_SHAPES),)
     )
     raw.commit()
     raw.close()
@@ -224,26 +270,24 @@ def test_generate_route_assigns_different_shape_to_each_post_in_batch():
         r.get_data()
 
     assert len(draft_systems) == 2
-    shape_a = "On this [job type], we [specific action]."
-    shape_b = "There's a reason [detail] never shows up in photos."
-    post0_has_a = shape_a in draft_systems[0]
-    post0_has_b = shape_b in draft_systems[0]
-    post1_has_a = shape_a in draft_systems[1]
-    post1_has_b = shape_b in draft_systems[1]
+    all_shapes = PROFILE_WITH_MANY_SHAPES['opener_shapes']
+    set0 = {s for s in all_shapes if s in draft_systems[0]}
+    set1 = {s for s in all_shapes if s in draft_systems[1]}
 
-    assert post0_has_a != post0_has_b, "post 0 must be assigned exactly one shape"
-    assert post1_has_a != post1_has_b, "post 1 must be assigned exactly one shape"
-    assert (post0_has_a, post0_has_b) != (post1_has_a, post1_has_b), (
-        "post 0 and post 1 were assigned the SAME shape -- rotation isn't working"
+    assert len(set0) == 3, f"post 0 should see exactly 3 candidates, saw {set0}"
+    assert len(set1) == 3, f"post 1 should see exactly 3 candidates, saw {set1}"
+    assert set0.isdisjoint(set1), (
+        "post 0 and post 1 were offered overlapping candidate shapes -- "
+        "the sliding window isn't advancing"
     )
     for s in draft_systems:
-        assert 'OPENER SHAPE FOR THIS POST' in s
+        assert 'OPENER SHAPE OPTIONS FOR THIS POST' in s
 
 
-def test_rewrite_post_assigns_a_shape_when_shapes_present():
-    """Single-post rewrite has no batch to round-robin against, but should
-    still force ONE randomly-chosen shape rather than leaving the model a
-    free menu of 25 to (in practice) mostly ignore."""
+def test_rewrite_post_offers_a_candidate_menu_when_shapes_present():
+    """Single-post rewrite has no batch to slide a window against, but should
+    still offer a small random menu rather than either a forced single shape
+    (round 1's mistake) or the full unbounded list (round 0's mistake)."""
     db_path = os.path.join(tempfile.gettempdir(), "hemingway_test_opener_11.db")
     app_module = _fresh_app(db_path)
 
@@ -252,7 +296,7 @@ def test_rewrite_post_assigns_a_shape_when_shapes_present():
     raw.execute(
         "INSERT INTO tone_profiles (client_id, context, version, source_type, source_text, "
         "profile_json, status, is_active) VALUES (1, 'default', 1, 'posts', 'x', ?, 'approved', 1)",
-        (json.dumps(PROFILE_WITH_SHAPES),)
+        (json.dumps(PROFILE_WITH_MANY_SHAPES),)
     )
     raw.execute("INSERT INTO batches (id, client_id, transcript_raw, style, length, context) VALUES (1, 1, 'x', 'conversational', 'short', '')")
     raw.execute("INSERT INTO posts (id, batch_id, title, body, section_body) VALUES (1, 1, 'T1', 'Old body.', 'sec1')")
@@ -271,10 +315,10 @@ def test_rewrite_post_assigns_a_shape_when_shapes_present():
     assert resp.status_code == 200, resp.get_json()
 
     joined = '\n'.join(captured)
-    assert 'OPENER SHAPE FOR THIS POST' in joined
-    shape_a = "On this [job type], we [specific action]."
-    shape_b = "There's a reason [detail] never shows up in photos."
-    assert (shape_a in joined) or (shape_b in joined)
+    assert 'OPENER SHAPE OPTIONS FOR THIS POST' in joined
+    all_shapes = PROFILE_WITH_MANY_SHAPES['opener_shapes']
+    offered = [s for s in all_shapes if s in joined]
+    assert len(offered) == 3, f"expected exactly 3 candidates offered, got {offered}"
 
 
 # --- _extract_opening_line heuristic ---
@@ -552,10 +596,11 @@ if __name__ == "__main__":
         test_render_opener_context_library_capped_at_ten,
         test_opener_context_reaches_system_prompt_when_profile_active,
         test_opener_context_absent_when_no_active_profile,
-        test_assigned_shape_renders_forced_instruction_not_full_list,
-        test_no_assigned_shape_falls_back_to_full_list_and_soft_instruction,
-        test_generate_route_assigns_different_shape_to_each_post_in_batch,
-        test_rewrite_post_assigns_a_shape_when_shapes_present,
+        test_multi_candidate_menu_renders_choose_one_instruction_not_full_list,
+        test_single_candidate_forces_it_outright,
+        test_no_candidates_falls_back_to_full_list_and_soft_instruction,
+        test_generate_route_assigns_disjoint_candidate_windows_per_post,
+        test_rewrite_post_offers_a_candidate_menu_when_shapes_present,
         test_extract_opening_line_short_first_line,
         test_extract_opening_line_truncates_long_first_line_at_sentence,
         test_extract_opening_line_empty_input,

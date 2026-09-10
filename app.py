@@ -901,7 +901,7 @@ def get_active_tone_extras(client_id, context='default'):
     return example_posts, target_length
 
 
-def review_and_revise_post(draft, style, client_rules, style_docs_text, global_style=None, active_tone_profile=None, example_posts=None, target_length=None, recent_openers=None, library_openers=None, assigned_opener_shape=None):
+def review_and_revise_post(draft, style, client_rules, style_docs_text, global_style=None, active_tone_profile=None, example_posts=None, target_length=None, recent_openers=None, library_openers=None, opener_shape_candidates=None):
     """Second pass: an independent editor call that checks the first pass's
     output against the same style/voice standards it was supposed to follow,
     and fixes anything that slipped through. Best-effort — if this call fails
@@ -923,7 +923,7 @@ def review_and_revise_post(draft, style, client_rules, style_docs_text, global_s
         target_length=target_length,
         recent_openers=recent_openers,
         library_openers=library_openers,
-        assigned_opener_shape=assigned_opener_shape,
+        opener_shape_candidates=opener_shape_candidates,
     )
     user = build_review_user_prompt(draft, style_docs_text)
     revised = call_anthropic(
@@ -935,7 +935,7 @@ def review_and_revise_post(draft, style, client_rules, style_docs_text, global_s
     return revised.strip() or draft
 
 
-def write_post_for_section(title, section_body, full_corpus, style, length, client_rules, style_docs_text, batch_context, global_style=None, active_tone_profile=None, example_posts=None, target_length=None, recent_openers=None, library_openers=None, assigned_opener_shape=None):
+def write_post_for_section(title, section_body, full_corpus, style, length, client_rules, style_docs_text, batch_context, global_style=None, active_tone_profile=None, example_posts=None, target_length=None, recent_openers=None, library_openers=None, opener_shape_candidates=None):
     global_style = global_style or {}
     system = build_system_prompt(
         style, client_rules,
@@ -946,7 +946,7 @@ def write_post_for_section(title, section_body, full_corpus, style, length, clie
         target_length=target_length,
         recent_openers=recent_openers,
         library_openers=library_openers,
-        assigned_opener_shape=assigned_opener_shape,
+        opener_shape_candidates=opener_shape_candidates,
     )
     # Phase 2: when a Tone Profile is active it fully replaces the manual
     # style_rules/reference-copy layer, so DON'T include either of those in
@@ -963,7 +963,7 @@ def write_post_for_section(title, section_body, full_corpus, style, length, clie
         messages=[{'role': 'user', 'content': user}]
     )
     try:
-        return review_and_revise_post(draft, style, client_rules, style_docs_text, global_style, active_tone_profile=active_tone_profile, example_posts=example_posts, target_length=target_length, recent_openers=recent_openers, library_openers=library_openers, assigned_opener_shape=assigned_opener_shape)
+        return review_and_revise_post(draft, style, client_rules, style_docs_text, global_style, active_tone_profile=active_tone_profile, example_posts=example_posts, target_length=target_length, recent_openers=recent_openers, library_openers=library_openers, opener_shape_candidates=opener_shape_candidates)
     except Exception:
         # Style QA pass is best-effort -- a working, unreviewed post beats no post.
         return draft
@@ -1029,15 +1029,24 @@ def generate():
     # in that same batch, which is the main reason openers kept repeating.
     recent_openers = get_recent_openers(client_id, tone_context)
     library_openers = get_opener_library(client_id, tone_context)
-    # Ben's ask 2026-09-10: the original "pick one shape, rotate" instruction
-    # was too soft -- in production the model gravitated to the same 1-2
-    # shapes (or invented its own opener not even in the list) across a
-    # 10-post batch instead of actually rotating. Fix: don't trust the model
-    # to self-regulate -- deterministically ROUND-ROBIN a shuffled copy of
-    # opener_shapes across the batch and hand each post exactly ONE assigned
-    # shape (see render_tone_profile_for_prompt's assigned_opener_shape
-    # branch). Shuffled fresh per request so back-to-back batches don't both
-    # start on the same shape.
+    # Ben's ask 2026-09-10 (round 1): the original "pick one shape, rotate"
+    # instruction was too soft -- in production the model gravitated to the
+    # same 1-2 shapes (or invented its own opener not even in the list)
+    # across a 10-post batch instead of actually rotating.
+    #
+    # Ben's ask 2026-09-10 (round 2): forcing exactly ONE shape per post (the
+    # first fix) over-corrected -- it produced posts where a shape got forced
+    # onto a topic it had nothing to do with (a Gulf Coast humidity/conditions
+    # shape bolted onto a post about a kitchen layout). Model discretion was
+    # the problem AND the solution: it needs SOME choice to judge topical fit,
+    # just not all 25 options (that's what caused round 1's non-rotation).
+    #
+    # Fix: a small ROTATING WINDOW of candidate shapes per post (see
+    # OPENER_SHAPE_CANDIDATE_WINDOW below) -- narrow enough to force real
+    # variety across a batch (each post sees a different slice), wide enough
+    # that the model can pick whichever of 2-3 options actually fits this
+    # post's real topic instead of forcing a bad match.
+    OPENER_SHAPE_CANDIDATE_WINDOW = 3
     opener_shape_rotation = list((active_tone_profile or {}).get('opener_shapes') or [])
     if opener_shape_rotation:
         random.shuffle(opener_shape_rotation)
@@ -1068,10 +1077,17 @@ def generate():
             yield json.dumps({'type': 'start', 'batchId': batch_id, 'total': len(sections)}) + '\n'
             for i, sec in enumerate(sections):
                 try:
-                    assigned_shape = (
-                        opener_shape_rotation[i % len(opener_shape_rotation)]
-                        if opener_shape_rotation else None
-                    )
+                    shape_candidates = None
+                    if opener_shape_rotation:
+                        L = len(opener_shape_rotation)
+                        w = min(OPENER_SHAPE_CANDIDATE_WINDOW, L)
+                        # Non-overlapping w-sized chunks through the shuffled
+                        # list, wrapping around -- guarantees each shape shows
+                        # up as a candidate roughly once per lap through the
+                        # full list, instead of the same 2-3 shapes getting
+                        # offered every single post.
+                        start = (i * w) % L
+                        shape_candidates = [opener_shape_rotation[(start + j) % L] for j in range(w)]
                     post = write_post_for_section(
                         sec['title'], sec['body'], corpus_for_context,
                         style, length, client_rules,
@@ -1081,7 +1097,7 @@ def generate():
                         target_length=target_length,
                         recent_openers=recent_openers + batch_openers,
                         library_openers=library_openers,
-                        assigned_opener_shape=assigned_shape,
+                        opener_shape_candidates=shape_candidates,
                     )
                     batch_openers.append(_extract_opening_line(post))
                     post_cursor = conn.execute(
@@ -1129,11 +1145,15 @@ def rewrite_post(post_id):
     try:
         _rewrite_example_posts, _rewrite_target_length = get_active_tone_extras(client['id'])
         _rewrite_profile = get_active_tone_profile(client['id'])
-        # No batch to round-robin against here (single post) -- pick one
-        # shape at random each time rather than leaving it to the model's
-        # discretion, same reasoning as the batch rotation in generate().
+        # No batch to round-robin against here (single post) -- offer a small
+        # random menu (same reasoning as generate()'s sliding window: forcing
+        # exactly one shape produced topically-forced posts, so let the model
+        # pick whichever of a few options actually fits this post).
         _rewrite_shapes = (_rewrite_profile or {}).get('opener_shapes') or []
-        _rewrite_assigned_shape = random.choice(_rewrite_shapes) if _rewrite_shapes else None
+        _rewrite_candidates = (
+            random.sample(_rewrite_shapes, min(3, len(_rewrite_shapes)))
+            if _rewrite_shapes else None
+        )
         new_body = write_post_for_section(
             post['title'], post['section_body'], batch['transcript_raw'],
             batch['style'], batch['length'], client_rules,
@@ -1143,7 +1163,7 @@ def rewrite_post(post_id):
             target_length=_rewrite_target_length,
             recent_openers=get_recent_openers(client['id']),
             library_openers=get_opener_library(client['id']),
-            assigned_opener_shape=_rewrite_assigned_shape,
+            opener_shape_candidates=_rewrite_candidates,
         )
         db.execute('UPDATE posts SET body = ? WHERE id = ?', (new_body, post_id))
         db.commit()

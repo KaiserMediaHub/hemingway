@@ -26,7 +26,7 @@ python -c "import ast; [ast.parse(open(f).read()) for f in ['app.py','db.py','pr
 echo.
 echo Committing and pushing...
 git add -A
-git commit -m "Phase 5/5b: opener rotation + opener library, with forced shape assignment (soft rotate instruction wasn't enough in production)"
+git commit -m "Phase 5/5b/5c: opener rotation + opener library. Soft rotate instruction didn't work (5b forced one shape), forcing one shape produced topically-forced posts (5c switches to a small rotating candidate menu the model picks from for topical fit)"
 git push
 echo.
 echo Done. Now deploy on the server:

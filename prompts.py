@@ -95,7 +95,7 @@ DEFAULT_BASE_RULES = '''Rules you never break:
 - Every sentence should either advance the idea, deepen it, or land it. Nothing else.'''
 
 
-def render_tone_profile_for_prompt(profile_dict, example_posts=None, target_length=None, opener_context=None, assigned_opener_shape=None):
+def render_tone_profile_for_prompt(profile_dict, example_posts=None, target_length=None, opener_context=None, opener_shape_candidates=None):
     """Turn a stored Tone Profile JSON dict into a prompt-ready instruction
     block. Called by build_system_prompt/build_review_system_prompt when a
     client has an active profile (Phase 2, Ben's ask 2026-08-27).
@@ -171,22 +171,39 @@ def render_tone_profile_for_prompt(profile_dict, example_posts=None, target_leng
             parts.append(f'  - {item}')
 
     opener_shapes = profile_dict.get('opener_shapes') or []
-    if opener_shapes and assigned_opener_shape:
-        # Forced assignment (Ben's ask, 2026-09-10, fixing Phase 5's original
-        # soft "pick one, rotate" instruction) -- in production, letting the
-        # model freely choose from 25 shapes produced almost no real variety:
-        # it gravitated to the same shape (or invented its own pattern not
-        # even in the list) across most of a 10-post batch. The caller now
-        # deterministically rotates through the shape list and hands the
-        # model exactly ONE shape per post, removing the choice entirely
-        # rather than trusting the model to self-regulate.
+    candidates = [c for c in (opener_shape_candidates or []) if c and str(c).strip()]
+    if opener_shapes and len(candidates) == 1:
+        # Only one candidate available (e.g. profile has exactly one shape) --
+        # nothing to choose between, so force it outright.
         parts.append(
             '\nOPENER SHAPE FOR THIS POST (Ben\'s ask, 2026-09-09/10) — this exact structural shape has '
             'been assigned to THIS post as part of an automatic rotation so consecutive posts don\'t '
             'repeat the same opening structure. Fill it in with the real facts/topic of THIS post. Do '
             'NOT use a different shape, and do not fall back to a generic opener of your own invention:\n'
-            f'  -> {assigned_opener_shape}'
+            f'  -> {candidates[0]}'
         )
+    elif opener_shapes and len(candidates) > 1:
+        # Narrowed-menu assignment (Ben's ask, 2026-09-10, fixing an issue
+        # found the same day it shipped: forcing exactly ONE shape per post
+        # produced grammatically fine but topically nonsensical posts --
+        # e.g. a "Gulf Coast humidity" conditions-shape forced onto a post
+        # about a kitchen layout that had nothing to do with weather. Letting
+        # the model choose freely from all 25 shapes didn't work either (see
+        # the single-shape branch's history) -- it barely rotated at all. The
+        # fix: hand the model a SMALL rotating menu (2-3 shapes, changes every
+        # post) and let it pick whichever one actually fits this post's real
+        # topic, instead of either extreme.
+        parts.append(
+            '\nOPENER SHAPE OPTIONS FOR THIS POST (Ben\'s ask, 2026-09-09/10) — choose EXACTLY ONE of the '
+            'following pre-selected shapes: whichever one genuinely fits the real facts and topic of THIS '
+            'post. This menu is narrowed and rotated automatically so posts in this batch stay varied -- '
+            'do not use a shape outside this list, but DO pick based on real topical fit, not just the '
+            'first option. If truly none of them fit this specific post\'s topic, pick the closest one '
+            'and adapt it rather than forcing an irrelevant detail (e.g. don\'t invent weather/conditions '
+            'framing for a post that has nothing to do with weather or site conditions):'
+        )
+        for c in candidates:
+            parts.append(f'  - {c}')
     elif opener_shapes:
         parts.append(
             '\nOPENER SHAPES (Ben\'s ask, 2026-09-09) — reusable STRUCTURES for how a post can open, '
@@ -267,7 +284,7 @@ def render_opener_context(recent_openers=None, library_openers=None):
     return '\n'.join(parts) if parts else ''
 
 
-def build_system_prompt(style, client_rules, global_style_doc=None, base_rules=None, active_tone_profile=None, example_posts=None, target_length=None, recent_openers=None, library_openers=None, assigned_opener_shape=None):
+def build_system_prompt(style, client_rules, global_style_doc=None, base_rules=None, active_tone_profile=None, example_posts=None, target_length=None, recent_openers=None, library_openers=None, opener_shape_candidates=None):
     # A client with a real voice guide on file (style_rules and/or reference
     # copy) should be governed by that guide alone, not a generic preset
     # running in parallel. Found in production 2026-08-20: the "punchy" preset
@@ -295,7 +312,7 @@ def build_system_prompt(style, client_rules, global_style_doc=None, base_rules=N
     profile_block = ''
     if active_tone_profile:
         opener_context = render_opener_context(recent_openers=recent_openers, library_openers=library_openers)
-        profile_block = render_tone_profile_for_prompt(active_tone_profile, example_posts=example_posts, target_length=target_length, opener_context=opener_context, assigned_opener_shape=assigned_opener_shape)
+        profile_block = render_tone_profile_for_prompt(active_tone_profile, example_posts=example_posts, target_length=target_length, opener_context=opener_context, opener_shape_candidates=opener_shape_candidates)
     has_active_profile = bool(profile_block)
     has_custom_voice = bool(client_rules and client_rules.strip())
 
@@ -383,7 +400,7 @@ def build_user_prompt(title, section_body, full_corpus, length, style_docs_text,
     return prompt
 
 
-def build_review_system_prompt(style, client_rules, global_style_doc=None, base_rules=None, active_tone_profile=None, example_posts=None, target_length=None, recent_openers=None, library_openers=None, assigned_opener_shape=None):
+def build_review_system_prompt(style, client_rules, global_style_doc=None, base_rules=None, active_tone_profile=None, example_posts=None, target_length=None, recent_openers=None, library_openers=None, opener_shape_candidates=None):
     # Same precedence fix as build_system_prompt above -- the review pass has
     # to defer to the client's voice guide the same way the draft pass does,
     # or it will "correct" a draft back into violating the client's own rules.
@@ -397,7 +414,7 @@ def build_review_system_prompt(style, client_rules, global_style_doc=None, base_
     profile_block = ''
     if active_tone_profile:
         opener_context = render_opener_context(recent_openers=recent_openers, library_openers=library_openers)
-        profile_block = render_tone_profile_for_prompt(active_tone_profile, example_posts=example_posts, target_length=target_length, opener_context=opener_context, assigned_opener_shape=assigned_opener_shape)
+        profile_block = render_tone_profile_for_prompt(active_tone_profile, example_posts=example_posts, target_length=target_length, opener_context=opener_context, opener_shape_candidates=opener_shape_candidates)
     has_active_profile = bool(profile_block)
     has_custom_voice = bool(client_rules and client_rules.strip())
 
