@@ -26,7 +26,7 @@ python -c "import ast; [ast.parse(open(f).read()) for f in ['app.py','db.py','pr
 echo.
 echo Committing and pushing...
 git add -A
-git commit -m "Phase 5: opener rotation (opener_shapes + recent/batch-aware anti-repetition) + opener library"
+git commit -m "Phase 5/5b: opener rotation + opener library, with forced shape assignment (soft rotate instruction wasn't enough in production)"
 git push
 echo.
 echo Done. Now deploy on the server:

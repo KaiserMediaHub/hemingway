@@ -1,5 +1,6 @@
 import os
 import json
+import random
 import sqlite3
 from functools import wraps
 from flask import Flask, request, session, jsonify, send_from_directory, Response, stream_with_context
@@ -900,7 +901,7 @@ def get_active_tone_extras(client_id, context='default'):
     return example_posts, target_length
 
 
-def review_and_revise_post(draft, style, client_rules, style_docs_text, global_style=None, active_tone_profile=None, example_posts=None, target_length=None, recent_openers=None, library_openers=None):
+def review_and_revise_post(draft, style, client_rules, style_docs_text, global_style=None, active_tone_profile=None, example_posts=None, target_length=None, recent_openers=None, library_openers=None, assigned_opener_shape=None):
     """Second pass: an independent editor call that checks the first pass's
     output against the same style/voice standards it was supposed to follow,
     and fixes anything that slipped through. Best-effort — if this call fails
@@ -922,6 +923,7 @@ def review_and_revise_post(draft, style, client_rules, style_docs_text, global_s
         target_length=target_length,
         recent_openers=recent_openers,
         library_openers=library_openers,
+        assigned_opener_shape=assigned_opener_shape,
     )
     user = build_review_user_prompt(draft, style_docs_text)
     revised = call_anthropic(
@@ -933,7 +935,7 @@ def review_and_revise_post(draft, style, client_rules, style_docs_text, global_s
     return revised.strip() or draft
 
 
-def write_post_for_section(title, section_body, full_corpus, style, length, client_rules, style_docs_text, batch_context, global_style=None, active_tone_profile=None, example_posts=None, target_length=None, recent_openers=None, library_openers=None):
+def write_post_for_section(title, section_body, full_corpus, style, length, client_rules, style_docs_text, batch_context, global_style=None, active_tone_profile=None, example_posts=None, target_length=None, recent_openers=None, library_openers=None, assigned_opener_shape=None):
     global_style = global_style or {}
     system = build_system_prompt(
         style, client_rules,
@@ -944,6 +946,7 @@ def write_post_for_section(title, section_body, full_corpus, style, length, clie
         target_length=target_length,
         recent_openers=recent_openers,
         library_openers=library_openers,
+        assigned_opener_shape=assigned_opener_shape,
     )
     # Phase 2: when a Tone Profile is active it fully replaces the manual
     # style_rules/reference-copy layer, so DON'T include either of those in
@@ -960,7 +963,7 @@ def write_post_for_section(title, section_body, full_corpus, style, length, clie
         messages=[{'role': 'user', 'content': user}]
     )
     try:
-        return review_and_revise_post(draft, style, client_rules, style_docs_text, global_style, active_tone_profile=active_tone_profile, example_posts=example_posts, target_length=target_length, recent_openers=recent_openers, library_openers=library_openers)
+        return review_and_revise_post(draft, style, client_rules, style_docs_text, global_style, active_tone_profile=active_tone_profile, example_posts=example_posts, target_length=target_length, recent_openers=recent_openers, library_openers=library_openers, assigned_opener_shape=assigned_opener_shape)
     except Exception:
         # Style QA pass is best-effort -- a working, unreviewed post beats no post.
         return draft
@@ -1026,6 +1029,18 @@ def generate():
     # in that same batch, which is the main reason openers kept repeating.
     recent_openers = get_recent_openers(client_id, tone_context)
     library_openers = get_opener_library(client_id, tone_context)
+    # Ben's ask 2026-09-10: the original "pick one shape, rotate" instruction
+    # was too soft -- in production the model gravitated to the same 1-2
+    # shapes (or invented its own opener not even in the list) across a
+    # 10-post batch instead of actually rotating. Fix: don't trust the model
+    # to self-regulate -- deterministically ROUND-ROBIN a shuffled copy of
+    # opener_shapes across the batch and hand each post exactly ONE assigned
+    # shape (see render_tone_profile_for_prompt's assigned_opener_shape
+    # branch). Shuffled fresh per request so back-to-back batches don't both
+    # start on the same shape.
+    opener_shape_rotation = list((active_tone_profile or {}).get('opener_shapes') or [])
+    if opener_shape_rotation:
+        random.shuffle(opener_shape_rotation)
 
     # Cap the voice-context corpus at 10 sections to control token costs on large batches.
     # The model only needs a sample to learn the speaker's voice — all 40+ sections is wasteful.
@@ -1053,6 +1068,10 @@ def generate():
             yield json.dumps({'type': 'start', 'batchId': batch_id, 'total': len(sections)}) + '\n'
             for i, sec in enumerate(sections):
                 try:
+                    assigned_shape = (
+                        opener_shape_rotation[i % len(opener_shape_rotation)]
+                        if opener_shape_rotation else None
+                    )
                     post = write_post_for_section(
                         sec['title'], sec['body'], corpus_for_context,
                         style, length, client_rules,
@@ -1062,6 +1081,7 @@ def generate():
                         target_length=target_length,
                         recent_openers=recent_openers + batch_openers,
                         library_openers=library_openers,
+                        assigned_opener_shape=assigned_shape,
                     )
                     batch_openers.append(_extract_opening_line(post))
                     post_cursor = conn.execute(
@@ -1108,15 +1128,22 @@ def rewrite_post(post_id):
 
     try:
         _rewrite_example_posts, _rewrite_target_length = get_active_tone_extras(client['id'])
+        _rewrite_profile = get_active_tone_profile(client['id'])
+        # No batch to round-robin against here (single post) -- pick one
+        # shape at random each time rather than leaving it to the model's
+        # discretion, same reasoning as the batch rotation in generate().
+        _rewrite_shapes = (_rewrite_profile or {}).get('opener_shapes') or []
+        _rewrite_assigned_shape = random.choice(_rewrite_shapes) if _rewrite_shapes else None
         new_body = write_post_for_section(
             post['title'], post['section_body'], batch['transcript_raw'],
             batch['style'], batch['length'], client_rules,
             style_docs_text, batch['context'], get_global_style(),
-            active_tone_profile=get_active_tone_profile(client['id']),
+            active_tone_profile=_rewrite_profile,
             example_posts=_rewrite_example_posts,
             target_length=_rewrite_target_length,
             recent_openers=get_recent_openers(client['id']),
             library_openers=get_opener_library(client['id']),
+            assigned_opener_shape=_rewrite_assigned_shape,
         )
         db.execute('UPDATE posts SET body = ? WHERE id = ?', (new_body, post_id))
         db.commit()

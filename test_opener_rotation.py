@@ -146,6 +146,137 @@ def test_opener_context_absent_when_no_active_profile():
     assert 'RECENTLY USED OPENERS' not in system
 
 
+# --- Forced opener-shape assignment (Ben's ask, 2026-09-10) ---
+# Production feedback: the original "pick one shape, rotate" instruction was
+# too soft -- across a real 10-post Harris batch, the model used only 2
+# distinct intros, and one of them ("Here we are...") wasn't even one of the
+# 25 shapes. Fix: the caller now deterministically assigns exactly one shape
+# per post rather than leaving the choice to the model.
+
+def test_assigned_shape_renders_forced_instruction_not_full_list():
+    from prompts import build_system_prompt
+    system = build_system_prompt(
+        'conversational', client_rules='', active_tone_profile=PROFILE_WITH_SHAPES,
+        assigned_opener_shape="On this [job type], we [specific action].",
+    )
+    assert 'OPENER SHAPE FOR THIS POST' in system
+    assert 'On this [job type], we [specific action].' in system
+    # The other shape from the profile must NOT be dumped into the prompt --
+    # forced-assignment mode shows only the one assigned shape, not the menu.
+    assert "There's a reason [detail] never shows up in photos." not in system
+
+
+def test_no_assigned_shape_falls_back_to_full_list_and_soft_instruction():
+    """Regression guard: single-post callers that don't pass
+    assigned_opener_shape (or profiles with no opener_shapes at all) keep the
+    old list-plus-soft-rotate rendering unchanged."""
+    from prompts import build_system_prompt
+    system = build_system_prompt(
+        'conversational', client_rules='', active_tone_profile=PROFILE_WITH_SHAPES,
+        assigned_opener_shape=None,
+    )
+    assert 'OPENER SHAPES (Ben\'s ask, 2026-09-09)' in system
+    assert 'OPENER SHAPE FOR THIS POST' not in system
+    assert 'On this [job type], we [specific action].' in system
+    assert "There's a reason [detail] never shows up in photos." in system
+
+
+def test_generate_route_assigns_different_shape_to_each_post_in_batch():
+    """The actual production fix: with a 2-shape profile and a 2-post batch,
+    each post must get a DIFFERENT assigned shape -- not left to chance."""
+    db_path = os.path.join(tempfile.gettempdir(), "hemingway_test_opener_10.db")
+    app_module = _fresh_app(db_path)
+
+    raw = sqlite3.connect(db_path)
+    raw.execute("INSERT INTO clients (id, name, style_rules) VALUES (1, 'Harris', '')")
+    raw.execute(
+        "INSERT INTO tone_profiles (client_id, context, version, source_type, source_text, "
+        "profile_json, status, is_active) VALUES (1, 'default', 1, 'posts', 'x', ?, 'approved', 1)",
+        (json.dumps(PROFILE_WITH_SHAPES),)
+    )
+    raw.commit()
+    raw.close()
+
+    client = _client(app_module)
+    draft_systems = []
+
+    def fake(model, max_tokens, system, messages):
+        user_content = messages[0]['content']
+        if 'DRAFT POST TO REVIEW:' in user_content:
+            after = user_content[user_content.index('DRAFT POST TO REVIEW:'):]
+            body_start = after.index('---\n') + len('---\n')
+            rest = after[body_start:]
+            body_end = rest.index('\n---')
+            return rest[:body_end]
+        draft_systems.append(system)
+        return "A generated post.\n\nBody text follows."
+
+    with patch.object(app_module, "call_anthropic", side_effect=fake):
+        r = client.post("/api/generate", json={
+            "clientId": 1,
+            "transcript": "Post 1:\nFirst topic.\n\nPost 2:\nSecond topic.",
+            "style": "conversational",
+            "length": "short",
+            "format": "plain",
+            "tone_context": "default",
+        })
+        assert r.status_code == 200
+        r.get_data()
+
+    assert len(draft_systems) == 2
+    shape_a = "On this [job type], we [specific action]."
+    shape_b = "There's a reason [detail] never shows up in photos."
+    post0_has_a = shape_a in draft_systems[0]
+    post0_has_b = shape_b in draft_systems[0]
+    post1_has_a = shape_a in draft_systems[1]
+    post1_has_b = shape_b in draft_systems[1]
+
+    assert post0_has_a != post0_has_b, "post 0 must be assigned exactly one shape"
+    assert post1_has_a != post1_has_b, "post 1 must be assigned exactly one shape"
+    assert (post0_has_a, post0_has_b) != (post1_has_a, post1_has_b), (
+        "post 0 and post 1 were assigned the SAME shape -- rotation isn't working"
+    )
+    for s in draft_systems:
+        assert 'OPENER SHAPE FOR THIS POST' in s
+
+
+def test_rewrite_post_assigns_a_shape_when_shapes_present():
+    """Single-post rewrite has no batch to round-robin against, but should
+    still force ONE randomly-chosen shape rather than leaving the model a
+    free menu of 25 to (in practice) mostly ignore."""
+    db_path = os.path.join(tempfile.gettempdir(), "hemingway_test_opener_11.db")
+    app_module = _fresh_app(db_path)
+
+    raw = sqlite3.connect(db_path)
+    raw.execute("INSERT INTO clients (id, name, style_rules) VALUES (1, 'Harris', '')")
+    raw.execute(
+        "INSERT INTO tone_profiles (client_id, context, version, source_type, source_text, "
+        "profile_json, status, is_active) VALUES (1, 'default', 1, 'posts', 'x', ?, 'approved', 1)",
+        (json.dumps(PROFILE_WITH_SHAPES),)
+    )
+    raw.execute("INSERT INTO batches (id, client_id, transcript_raw, style, length, context) VALUES (1, 1, 'x', 'conversational', 'short', '')")
+    raw.execute("INSERT INTO posts (id, batch_id, title, body, section_body) VALUES (1, 1, 'T1', 'Old body.', 'sec1')")
+    raw.commit()
+    raw.close()
+
+    client = _client(app_module)
+    captured = []
+
+    def fake(model, max_tokens, system, messages):
+        captured.append(system)
+        return "Rewritten post."
+
+    with patch.object(app_module, "call_anthropic", side_effect=fake):
+        resp = client.post("/api/posts/1/rewrite", json={})
+    assert resp.status_code == 200, resp.get_json()
+
+    joined = '\n'.join(captured)
+    assert 'OPENER SHAPE FOR THIS POST' in joined
+    shape_a = "On this [job type], we [specific action]."
+    shape_b = "There's a reason [detail] never shows up in photos."
+    assert (shape_a in joined) or (shape_b in joined)
+
+
 # --- _extract_opening_line heuristic ---
 
 def test_extract_opening_line_short_first_line():
@@ -421,6 +552,10 @@ if __name__ == "__main__":
         test_render_opener_context_library_capped_at_ten,
         test_opener_context_reaches_system_prompt_when_profile_active,
         test_opener_context_absent_when_no_active_profile,
+        test_assigned_shape_renders_forced_instruction_not_full_list,
+        test_no_assigned_shape_falls_back_to_full_list_and_soft_instruction,
+        test_generate_route_assigns_different_shape_to_each_post_in_batch,
+        test_rewrite_post_assigns_a_shape_when_shapes_present,
         test_extract_opening_line_short_first_line,
         test_extract_opening_line_truncates_long_first_line_at_sentence,
         test_extract_opening_line_empty_input,
