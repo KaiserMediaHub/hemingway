@@ -301,14 +301,18 @@ def build_system_prompt(style, client_rules, global_style_doc=None, base_rules=N
     global_style_doc = global_style_doc if global_style_doc is not None else DEFAULT_GLOBAL_STYLE_DOC
     base_rules = base_rules if base_rules is not None else DEFAULT_BASE_RULES
 
-    # Phase 2 precedence (Ben's ask 2026-08-27): when an active Tone Profile
-    # exists, it FULLY REPLACES the manual style_rules/reference-copy layer,
-    # so a bad profile can't be silently rescued by an old rule that
-    # accidentally still applies -- makes the profile's real signal
-    # unambiguous when we validate against Harris Projects's 9 client-edit
-    # pairs in Phase 3. Global style + base rules stay unconditionally
-    # (those are house standards, not client voice). The old style_rules
-    # code path is preserved verbatim for clients with no active profile.
+    # Precedence, v2 (Ben's ask 2026-09-10): Phase 2 originally made an
+    # active Tone Profile FULLY REPLACE the manual style_rules/reference-copy
+    # layer, so the Delta Analyzer had a clean signal to validate against.
+    # Ben has since dropped the Delta Analyzer entirely (too fiddly, and
+    # redundant with edits he already captures by hand in the Style Rules
+    # doc) -- so the reason for strict either/or is gone. Now BOTH layers
+    # combine: the Tone Profile (typically synthesized once from a long-form
+    # interview -- captures natural rhythm/vocabulary that's hard to write
+    # down as rules) is the voice BASELINE, and the client's own Style Rules
+    # doc is layered on top as explicit, human-reviewed corrections that win
+    # on conflict. Global style + base rules stay unconditionally (house
+    # standards, not client voice).
     profile_block = ''
     if active_tone_profile:
         opener_context = render_opener_context(recent_openers=recent_openers, library_openers=library_openers)
@@ -332,19 +336,30 @@ def build_system_prompt(style, client_rules, global_style_doc=None, base_rules=N
     if has_active_profile:
         base += profile_block
         base += (
-            'The Tone Profile above takes priority over the base rules below. If a base rule '
-            'below conflicts with the Tone Profile, the profile wins -- do not enforce the base '
-            'rule in that case.\n\n'
+            'The Tone Profile above is the voice BASELINE for this client -- typically synthesized '
+            'once from a long-form interview, capturing natural rhythm and vocabulary. It takes '
+            'priority over the base rules below.\n\n'
         )
-    elif has_custom_voice:
-        base += (
-            'CLIENT-SPECIFIC RULES — read these carefully before writing anything. '
-            'These take priority over EVERYTHING else in this prompt, including the base rules '
-            'below. If a base rule below conflicts with a client rule or a client reference '
-            'example, the client rule wins -- do not apply the base rule in that case. Follow '
-            'every client instruction exactly:\n\n'
-            f'{client_rules.strip()}\n\n'
-        )
+
+    if has_custom_voice:
+        if has_active_profile:
+            base += (
+                'CLIENT-SPECIFIC RULES — this client\'s own explicit, human-reviewed corrections. '
+                'These take priority over the Tone Profile above where the two conflict: the Tone '
+                'Profile is a general baseline, but these rules are specific things the client has '
+                'explicitly called out, which is higher-trust signal. They also take priority over '
+                'the base rules below. Follow every client instruction exactly:\n\n'
+                f'{client_rules.strip()}\n\n'
+            )
+        else:
+            base += (
+                'CLIENT-SPECIFIC RULES — read these carefully before writing anything. '
+                'These take priority over EVERYTHING else in this prompt, including the base rules '
+                'below. If a base rule below conflicts with a client rule or a client reference '
+                'example, the client rule wins -- do not apply the base rule in that case. Follow '
+                'every client instruction exactly:\n\n'
+                f'{client_rules.strip()}\n\n'
+            )
     base += base_rules
     return base
 
@@ -431,18 +446,28 @@ def build_review_system_prompt(style, client_rules, global_style_doc=None, base_
     if has_active_profile:
         parts += profile_block
         parts += (
-            'The Tone Profile above takes priority over the base rules below. If a base rule '
-            'conflicts with the Tone Profile, the profile wins -- do not "fix" a draft that '
-            'complies with the profile just because it violates a base rule. Check the draft '
-            'against every element of the profile and every base rule that does not conflict.\n\n'
+            'The Tone Profile above is the voice BASELINE for this client. It takes priority over '
+            'the base rules below. If a base rule conflicts with the Tone Profile, the profile wins '
+            '-- do not "fix" a draft that complies with the profile just because it violates a base '
+            'rule. Check the draft against every element of the profile and every base rule that '
+            'does not conflict.\n\n'
         )
-    elif has_custom_voice:
-        parts += (
-            'CLIENT-SPECIFIC RULES — these take priority over EVERYTHING else, including the base '
-            'rules below. If a base rule conflicts with a client rule or a client reference '
-            f'example, the client rule wins -- do not enforce the base rule in that case. Check '
-            f'the draft against every one of these:\n\n{client_rules.strip()}\n\n'
-        )
+
+    if has_custom_voice:
+        if has_active_profile:
+            parts += (
+                'CLIENT-SPECIFIC RULES — this client\'s own explicit, human-reviewed corrections. '
+                'These take priority over the Tone Profile above where the two conflict (higher-trust '
+                'signal than the general baseline), and over the base rules below. Check the draft '
+                f'against every one of these:\n\n{client_rules.strip()}\n\n'
+            )
+        else:
+            parts += (
+                'CLIENT-SPECIFIC RULES — these take priority over EVERYTHING else, including the base '
+                'rules below. If a base rule conflicts with a client rule or a client reference '
+                f'example, the client rule wins -- do not enforce the base rule in that case. Check '
+                f'the draft against every one of these:\n\n{client_rules.strip()}\n\n'
+            )
 
     parts += (
         base_rules

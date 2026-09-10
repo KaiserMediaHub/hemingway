@@ -972,14 +972,14 @@ def write_post_for_section(title, section_body, full_corpus, style, length, clie
         library_openers=library_openers,
         opener_shape_candidates=opener_shape_candidates,
     )
-    # Phase 2: when a Tone Profile is active it fully replaces the manual
-    # style_rules/reference-copy layer, so DON'T include either of those in
-    # the user prompt -- passing them in as reference material would leak the
-    # exact voice signal we're trying to test the profile against, and would
-    # muddy the Phase 3 delta validation Ben plans against Harris's 9 pairs.
-    user_style_docs = '' if active_tone_profile else style_docs_text
-    user_client_rules = '' if active_tone_profile else client_rules
-    user = build_user_prompt(title, section_body, full_corpus, length, user_style_docs, batch_context, user_client_rules)
+    # Precedence v2 (Ben's ask 2026-09-10): reference copy and client rules
+    # now ALWAYS reach the user prompt regardless of whether a Tone Profile
+    # is active -- the old suppression (Phase 2) existed only to keep a clean
+    # signal for Delta Analyzer validation, which Ben has since dropped in
+    # favor of combining the Tone Profile (voice baseline) with the client's
+    # own Style Rules doc (explicit corrections) at all times. See
+    # build_system_prompt's matching precedence-v2 comment.
+    user = build_user_prompt(title, section_body, full_corpus, length, style_docs_text, batch_context, client_rules)
     draft = call_anthropic(
         model='claude-sonnet-4-5',
         max_tokens=1200,

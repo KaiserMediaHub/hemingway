@@ -1,7 +1,16 @@
 """
-Phase 2 tests (Ben's ask 2026-08-27): active Tone Profile reaches the prompt
-and REPLACES the manual style_rules / reference-copy layer when present.
+Phase 2 tests (Ben's ask 2026-08-27): active Tone Profile reaches the prompt.
 Also proves the /api/generate route uses the active profile end-to-end.
+
+UPDATED 2026-09-10 (precedence v2, Ben's ask): originally an active Tone
+Profile fully REPLACED the manual style_rules/reference-copy layer -- that
+was so the (now-retired) Delta Analyzer had a clean signal to validate
+against. Ben dropped the Delta Analyzer as redundant with edits he already
+makes by hand in the Style Rules doc, so the two layers now COMBINE: the
+Tone Profile is the voice baseline (typically from a long-form interview),
+and the client's own Style Rules are layered on top as higher-trust,
+human-reviewed corrections that win on conflict. See build_system_prompt's
+"Precedence, v2" comment in prompts.py.
 
 Run: python test_tone_profile_phase2.py
 """
@@ -64,18 +73,22 @@ def test_prompt_includes_profile_when_active():
     assert 'use corporate jargon' in system  # voice_dont surfaces too
 
 
-def test_prompt_skips_style_rules_when_profile_active():
-    """When both a profile and manual style_rules exist, the profile fully
-    replaces the style_rules layer -- that's the precedence Ben chose so the
-    Phase 3 delta validation stays clean."""
+def test_prompt_combines_style_rules_with_active_profile():
+    """Precedence v2 (2026-09-10): when both a profile and manual style_rules
+    exist, BOTH reach the prompt -- the profile as baseline, style_rules as
+    higher-trust explicit corrections layered on top. Both markers must be
+    present, and the client-rules text should be framed as taking priority
+    over the profile on conflict."""
     from prompts import build_system_prompt
     system = build_system_prompt(
         'conversational',
         client_rules='NEVER USE THE WORD BANANA',
         active_tone_profile=PROFILE,
     )
-    assert 'BANANA' not in system, "style_rules must NOT be injected when a Tone Profile is active"
-    assert 'CLIENT-SPECIFIC RULES' not in system
+    assert 'ACTIVE TONE PROFILE' in system
+    assert 'BANANA' in system, "style_rules must still reach the prompt alongside an active Tone Profile"
+    assert 'CLIENT-SPECIFIC RULES' in system
+    assert 'take priority over the Tone Profile above' in system
 
 
 def test_prompt_falls_back_to_style_rules_when_no_profile():
@@ -105,7 +118,7 @@ def test_low_confidence_categories_marked_as_tendency():
     assert 'low confidence' in system or 'tendency' in system.lower()
 
 
-def test_review_prompt_also_sees_profile():
+def test_review_prompt_also_sees_profile_and_style_rules():
     from prompts import build_review_system_prompt
     system = build_review_system_prompt(
         'conversational',
@@ -114,7 +127,7 @@ def test_review_prompt_also_sees_profile():
     )
     assert 'ACTIVE TONE PROFILE' in system
     assert 'state claims without hedging' in system
-    assert 'BANANA' not in system, "review-pass style_rules must ALSO be skipped when profile active"
+    assert 'BANANA' in system, "review-pass style_rules must combine with an active profile, not be skipped"
 
 
 def test_no_profile_no_change_to_existing_behavior():
@@ -130,13 +143,45 @@ def test_no_profile_no_change_to_existing_behavior():
     assert rev1 == rev2
 
 
+def test_write_post_for_section_includes_reference_copy_with_active_profile():
+    """Precedence v2 (2026-09-10): reference copy (uploaded sample docs) and
+    client_rules must reach the actual USER prompt even when a Tone Profile
+    is active -- the old suppression in write_post_for_section existed only
+    to keep a clean signal for the now-retired Delta Analyzer.
+
+    Uses _fresh_app (temp DB_PATH) like every other app-touching test in this
+    file, rather than a bare `import app` -- importing app.py runs init_db()
+    at import time against whatever DB_PATH is currently set, and this file
+    must never let that fall through to the real local/production database."""
+    db_path = os.path.join(tempfile.gettempdir(), "hemingway_test_phase2_4.db")
+    app_module = _fresh_app(db_path)
+    captured_user = []
+
+    def fake(model, max_tokens, system, messages):
+        captured_user.append(messages[0]['content'])
+        return "Generated post."
+
+    with patch.object(app_module, "call_anthropic", side_effect=fake):
+        app_module.write_post_for_section(
+            'Title', 'Section body text.', 'Full corpus text.',
+            'conversational', 'short', 'NEVER USE THE WORD BANANA',
+            'REAL REFERENCE COPY MARKER', '', {},
+            active_tone_profile=PROFILE,
+        )
+    joined = '\n'.join(captured_user)
+    assert 'REAL REFERENCE COPY MARKER' in joined, (
+        "reference copy must reach the user prompt alongside an active Tone Profile"
+    )
+    os.remove(db_path)
+
+
 # --- End-to-end route test ---
 
 def test_generate_route_uses_active_profile():
     """When a client has an ACTIVE Tone Profile, /api/generate must inject
-    it into the actual prompt sent to Claude, and must NOT inject the
-    client's style_rules -- proves the whole chain including the pre-stream
-    fetch + stream() closure wiring is correct."""
+    it into the actual prompt sent to Claude, AND (precedence v2) must still
+    inject the client's style_rules alongside it -- proves the whole chain
+    including the pre-stream fetch + stream() closure wiring is correct."""
     db_path = os.path.join(tempfile.gettempdir(), "hemingway_test_phase2_1.db")
     app_module = _fresh_app(db_path)
 
@@ -172,7 +217,7 @@ def test_generate_route_uses_active_profile():
     joined = '\n'.join(captured)
     assert 'ACTIVE TONE PROFILE' in joined, "profile block never made it into any prompt"
     assert 'state claims without hedging' in joined
-    assert 'BANANA' not in joined, "style_rules leaked into prompt even though profile is active"
+    assert 'BANANA' in joined, "style_rules must combine with an active profile (precedence v2), not be suppressed"
     os.remove(db_path)
 
 
@@ -256,11 +301,12 @@ def test_generate_route_respects_tone_context():
 if __name__ == "__main__":
     tests = [
         test_prompt_includes_profile_when_active,
-        test_prompt_skips_style_rules_when_profile_active,
+        test_prompt_combines_style_rules_with_active_profile,
         test_prompt_falls_back_to_style_rules_when_no_profile,
         test_low_score_categories_filtered,
         test_low_confidence_categories_marked_as_tendency,
-        test_review_prompt_also_sees_profile,
+        test_review_prompt_also_sees_profile_and_style_rules,
+        test_write_post_for_section_includes_reference_copy_with_active_profile,
         test_no_profile_no_change_to_existing_behavior,
         test_generate_route_uses_active_profile,
         test_generate_route_falls_back_when_no_active_profile,

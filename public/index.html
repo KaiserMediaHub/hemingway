@@ -341,9 +341,12 @@
             <div id="tpProfileView" style="display:none;"></div>
           </div>
 
-          <!-- ===== Delta Analyzer (Phase 3) ===== -->
-          <div class="card">
-            <div class="card-title">Delta Analyzer</div>
+          <!-- ===== Delta Analyzer (Phase 3) -- retired, Ben's ask 2026-09-10:
+               too fiddly and redundant with edits he already makes by hand in
+               the Style Rules doc. Hidden by default rather than removed --
+               nothing is deleted, past attempts are still here if ever needed. ===== -->
+          <details class="card">
+            <summary class="card-title" style="cursor:pointer;">Delta Analyzer (retired -- click to show)</summary>
             <div class="card-sub">Paste a post Hemingway wrote and what the client actually changed it to. Hemingway proposes an updated Tone Profile version and tries to recreate the client's edit using it -- you judge whether it closed the gap.</div>
 
             <div id="deltaNoProfileWarning" class="tp-active-banner" style="display:none;border-left-color:#c0392b;">
@@ -394,7 +397,7 @@
               <div style="font-size:12px;font-weight:600;color:var(--ink-mid);margin-bottom:8px;">Past attempts</div>
               <div id="deltaHistoryList"><div style="font-size:12px;color:var(--ink-light);">Loading...</div></div>
             </div>
-          </div>
+          </details>
 
           <!-- ===== Opener Library (Ben's ask, 2026-09-09) ===== -->
           <div class="card">
