@@ -213,6 +213,120 @@ def test_input_validation():
     os.remove(db_path)
 
 
+# --- Deactivate (Ben's ask, 2026-09-10): "go back to the simple version" ---
+# After a stretch of production issues with the Tone Profile / opener-shape
+# machinery, Ben wants a clean way to turn Tone Profile off per client and
+# fall back to the original system (manual style_rules doc + uploaded
+# reference-copy sample docs) WITHOUT deleting any profile history, so he can
+# reactivate later if he wants back in. write_post_for_section/
+# build_system_prompt already fall back to that path whenever
+# active_tone_profile is None (Phase 2's existing precedence rule) -- this
+# just needs to flip is_active off for every version in the context.
+
+def test_deactivate_turns_off_active_profile():
+    db_path = os.path.join(tempfile.gettempdir(), "hemingway_test_tone_7.db")
+    app_module = _fresh_app(db_path)
+    _seed_client(db_path)
+    client = _client(app_module)
+
+    with patch.object(app_module, "call_anthropic", side_effect=_fake_call):
+        v1 = client.post("/api/clients/1/tone-profiles",
+                         json={"source_type": "transcript", "source_text": "A" * 500}).get_json()
+    client.post(f"/api/clients/1/tone-profiles/{v1['id']}/activate")
+    assert client.get("/api/clients/1/tone-profiles/active?context=default").get_json() is not None
+
+    resp = client.post("/api/clients/1/tone-profiles/deactivate", json={"context": "default"})
+    assert resp.status_code == 200, resp.get_json()
+
+    active = client.get("/api/clients/1/tone-profiles/active?context=default").get_json()
+    assert active is None, "profile should no longer be active after deactivate"
+
+    # History must survive -- nothing deleted, just flipped off.
+    lst = client.get("/api/clients/1/tone-profiles?context=default").get_json()
+    assert len(lst) == 1
+    assert lst[0]["id"] == v1["id"]
+    assert lst[0]["is_active"] == 0
+    os.remove(db_path)
+
+
+def test_deactivate_only_affects_specified_context():
+    db_path = os.path.join(tempfile.gettempdir(), "hemingway_test_tone_8.db")
+    app_module = _fresh_app(db_path)
+    _seed_client(db_path)
+    client = _client(app_module)
+
+    with patch.object(app_module, "call_anthropic", side_effect=_fake_call):
+        d1 = client.post("/api/clients/1/tone-profiles",
+                         json={"source_type": "transcript", "source_text": "A" * 500,
+                               "context": "default"}).get_json()
+        e1 = client.post("/api/clients/1/tone-profiles",
+                         json={"source_type": "posts", "source_text": "B" * 500,
+                               "context": "event"}).get_json()
+    client.post(f"/api/clients/1/tone-profiles/{d1['id']}/activate")
+    client.post(f"/api/clients/1/tone-profiles/{e1['id']}/activate")
+
+    client.post("/api/clients/1/tone-profiles/deactivate", json={"context": "default"})
+
+    assert client.get("/api/clients/1/tone-profiles/active?context=default").get_json() is None
+    active_event = client.get("/api/clients/1/tone-profiles/active?context=event").get_json()
+    assert active_event is not None and active_event["id"] == e1["id"], (
+        "deactivating 'default' must not touch the 'event' context's active profile"
+    )
+    os.remove(db_path)
+
+
+def test_deactivate_404_on_unknown_client():
+    db_path = os.path.join(tempfile.gettempdir(), "hemingway_test_tone_9.db")
+    app_module = _fresh_app(db_path)
+    client = _client(app_module)
+
+    resp = client.post("/api/clients/999/tone-profiles/deactivate", json={"context": "default"})
+    assert resp.status_code == 404
+    os.remove(db_path)
+
+
+def test_generation_falls_back_to_style_rules_after_deactivate():
+    """The actual point of this feature: after deactivating, /api/generate
+    must go back to using the client's manual style_rules doc, exactly like a
+    client that never had a Tone Profile at all (Phase 2's existing
+    precedence/fallback logic, unchanged)."""
+    db_path = os.path.join(tempfile.gettempdir(), "hemingway_test_tone_10.db")
+    app_module = _fresh_app(db_path)
+
+    raw = sqlite3.connect(db_path)
+    raw.execute("INSERT INTO clients (id, name, style_rules) VALUES (1, 'Harris', 'NEVER USE THE WORD BANANA')")
+    raw.commit()
+    raw.close()
+    client = _client(app_module)
+
+    with patch.object(app_module, "call_anthropic", side_effect=_fake_call):
+        v1 = client.post("/api/clients/1/tone-profiles",
+                         json={"source_type": "transcript", "source_text": "A" * 500}).get_json()
+    client.post(f"/api/clients/1/tone-profiles/{v1['id']}/activate")
+    client.post("/api/clients/1/tone-profiles/deactivate", json={"context": "default"})
+
+    captured = []
+    def fake(model, max_tokens, system, messages):
+        captured.append(system)
+        return "Generated post."
+
+    with patch.object(app_module, "call_anthropic", side_effect=fake):
+        r = client.post("/api/generate", json={
+            "clientId": 1,
+            "transcript": "Post 1:\nWrite about our launch.",
+            "style": "conversational",
+            "length": "short",
+            "format": "plain",
+        })
+        assert r.status_code == 200
+        r.get_data()
+
+    joined = '\n'.join(captured)
+    assert 'BANANA' in joined, "style_rules must reach the prompt again once Tone Profile is deactivated"
+    assert 'ACTIVE TONE PROFILE' not in joined, "deactivated profile must not still be injected"
+    os.remove(db_path)
+
+
 if __name__ == "__main__":
     tests = [
         test_generate_v1_pending_by_default,
@@ -221,6 +335,10 @@ if __name__ == "__main__":
         test_source_mix_accumulates_across_versions,
         test_reject_pending_only,
         test_input_validation,
+        test_deactivate_turns_off_active_profile,
+        test_deactivate_only_affects_specified_context,
+        test_deactivate_404_on_unknown_client,
+        test_generation_falls_back_to_style_rules_after_deactivate,
     ]
     for t in tests:
         t()

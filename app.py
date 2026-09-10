@@ -395,6 +395,30 @@ def activate_tone_profile(client_id, profile_id):
     return jsonify(dict(updated))
 
 
+@app.route('/api/clients/<int:client_id>/tone-profiles/deactivate', methods=['POST'])
+@require_auth
+def deactivate_tone_profile(client_id):
+    """Ben's ask 2026-09-10: turn OFF the Tone Profile system for a client
+    entirely, reverting generation to the original simple system (manual
+    style_rules doc + uploaded reference-copy sample docs in style_docs) --
+    write_post_for_section/build_system_prompt already fall back to that
+    exact path whenever active_tone_profile is None (Phase 2's precedence
+    rule), so this needs no new generation logic, just a way to flip every
+    version for this client/context off. Non-destructive: profile history is
+    untouched and can be reactivated later via the existing activate route."""
+    data = request.get_json() or {}
+    context = (data.get('context') or 'default').strip() or 'default'
+    db = get_db()
+    if not db.execute('SELECT id FROM clients WHERE id = ?', (client_id,)).fetchone():
+        return jsonify({'error': {'message': 'Client not found.'}}), 404
+    db.execute(
+        'UPDATE tone_profiles SET is_active = 0 WHERE client_id = ? AND context = ?',
+        (client_id, context)
+    )
+    db.commit()
+    return jsonify({'ok': True, 'context': context})
+
+
 @app.route('/api/clients/<int:client_id>/tone-profiles/<int:profile_id>/reject', methods=['POST'])
 @require_auth
 def reject_tone_profile(client_id, profile_id):

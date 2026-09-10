@@ -317,6 +317,11 @@
             </div>
 
             <div id="tpActiveBanner" style="display:none;" class="tp-active-banner"></div>
+            <div id="tpDeactivateRow" style="display:none;margin-bottom:14px;">
+              <button class="btn" onclick="deactivateToneProfile()" style="color:#c0392b;">Turn off Tone Profile for this context</button>
+              <span style="font-size:11px;color:var(--ink-light);margin-left:8px;">Reverts to the simple system: this client's manual Style Rules doc + uploaded Reference Copy sample docs below. Nothing is deleted -- you can reactivate any version above later.</span>
+              <span class="status" id="tpDeactivateStatus" style="margin-left:8px;"></span>
+            </div>
 
             <div class="tp-source-type">
               <label><input type="radio" name="tpSourceType" value="transcript" checked> <span>Transcript (spoken)</span></label>
@@ -737,14 +742,17 @@ async function loadToneProfiles() {
 
   // Active-banner
   const banner = document.getElementById('tpActiveBanner');
+  const deactivateRow = document.getElementById('tpDeactivateRow');
   if (active) {
     const mix = active.source_mix ? JSON.parse(active.source_mix) : {};
     const spoken = mix.spoken_chars || 0, written = mix.written_chars || 0;
     banner.style.display = 'block';
     banner.innerHTML = '<b>Active:</b> v' + active.version + ' (' + escapeHtml(active.source_type) + ')'
       + ' &middot; source mix: ' + spoken.toLocaleString() + ' spoken chars / ' + written.toLocaleString() + ' written chars';
+    if (deactivateRow) deactivateRow.style.display = 'block';
   } else {
     banner.style.display = 'none';
+    if (deactivateRow) deactivateRow.style.display = 'none';
   }
 
   // Delta Analyzer needs an active profile to diff against
@@ -891,6 +899,26 @@ async function activateToneProfile(profileId) {
   await fetch('/api/clients/' + currentClientId + '/tone-profiles/' + profileId + '/activate', { method: 'POST' });
   loadToneProfiles();
   refreshWriteToneStatus();
+}
+
+async function deactivateToneProfile() {
+  if (!currentClientId) return;
+  const ctx = document.getElementById('tpContext').value;
+  if (!confirm('Turn off the Tone Profile for this context? Generation will go back to using this client\'s manual Style Rules doc and uploaded Reference Copy sample docs instead. Nothing is deleted -- you can reactivate a version later.')) return;
+  const status = document.getElementById('tpDeactivateStatus');
+  status.textContent = 'Turning off...';
+  try {
+    await fetch('/api/clients/' + currentClientId + '/tone-profiles/deactivate', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ context: ctx }),
+    });
+    status.textContent = 'Done -- back to the simple system.';
+    loadToneProfiles();
+    refreshWriteToneStatus();
+  } catch (e) {
+    status.textContent = 'Failed.';
+    status.style.color = 'var(--red)';
+  }
 }
 
 async function rejectToneProfile(profileId) {
