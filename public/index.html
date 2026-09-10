@@ -333,10 +333,10 @@
               <span class="status" id="tpStatus"></span>
             </div>
 
-            <div style="margin-top:20px;">
-              <div style="font-size:12px;font-weight:600;color:var(--ink-mid);margin-bottom:8px;">Versions</div>
-              <div id="tpVersionList"><div style="font-size:12px;color:var(--ink-light);">Loading...</div></div>
-            </div>
+            <details style="margin-top:20px;" id="tpVersionsDetails">
+              <summary style="font-size:12px;font-weight:600;color:var(--ink-mid);cursor:pointer;">Versions (<span id="tpVersionCount">0</span>) -- click to show</summary>
+              <div id="tpVersionList" style="margin-top:8px;"><div style="font-size:12px;color:var(--ink-light);">Loading...</div></div>
+            </details>
 
             <div id="tpProfileView" style="display:none;"></div>
           </div>
@@ -767,6 +767,8 @@ async function loadToneProfiles() {
 
   // Version list
   const list = document.getElementById('tpVersionList');
+  const versionCount = document.getElementById('tpVersionCount');
+  if (versionCount) versionCount.textContent = profiles.length;
   if (!profiles.length) {
     list.innerHTML = '<div style="font-size:12px;color:var(--ink-light);">No versions yet. Paste source material above and generate v1.</div>';
     return;
